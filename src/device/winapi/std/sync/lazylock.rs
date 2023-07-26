@@ -15,6 +15,7 @@
 //
 
 #![no_implicit_prelude]
+#![cfg(windows)]
 
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;

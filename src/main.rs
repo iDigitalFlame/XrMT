@@ -32,7 +32,6 @@
 )]
 #![cfg_attr(any(unix, feature = "std"), feature(io_error_more, can_vector, seek_stream_len))]
 #![feature(ip_in_core, error_in_core, new_uninit)]
-
 // We'll enable these later :P
 //#![windows_subsystem = "console"]
 //#![windows_subsystem = "windows"]
@@ -63,6 +62,8 @@ fn main_inner() -> i32 {
     p.flags.set_len(999);
     p.flags |= Flag::CRYPT;
     p.write_str(&"derp").unwrap();
+
+    println!("packet {:?}", p);
 
     c2::shoot("localhost:8080", p).unwrap();
 

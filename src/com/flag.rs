@@ -298,13 +298,7 @@ mod display {
                     b[n] = b'[';
                     n += 1 + self.group().into_hex_buf(&mut b[n + 1..]);
                     b[n] = b':';
-                    println!("fv1 {n} '{}'", unsafe {
-                        core::str::from_utf8_unchecked(&b)
-                    });
                     n += 1 + (self.position() + 1).into_buf(&mut b[n + 1..]);
-                    println!("fv2 {n} '{}'", unsafe {
-                        core::str::from_utf8_unchecked(&b)
-                    });
                     b[n] = b'/';
                     n += 1 + self.len().into_buf(&mut b[n + 1..]);
                     b[n] = b']';

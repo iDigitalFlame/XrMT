@@ -17,9 +17,6 @@
 #![no_implicit_prelude]
 
 pub use self::inner::*;
-pub use self::lazy::*;
-
-mod lazy;
 
 #[cfg(unix)]
 mod inner {
@@ -35,6 +32,7 @@ mod inner {
     mod event;
     mod group;
     mod lazy;
+    mod lazylock;
     pub mod mpsc;
     mod mutant;
     mod mutex;
@@ -48,6 +46,7 @@ mod inner {
     pub use self::event::*;
     pub use self::group::*;
     pub(crate) use self::lazy::*;
+    pub use self::lazylock::*;
     pub use self::mutant::*;
     pub use self::mutex::*;
     pub use self::once::*;

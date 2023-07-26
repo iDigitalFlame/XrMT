@@ -16,6 +16,8 @@
 
 #![no_implicit_prelude]
 
+use core::cmp;
+
 use crate::util;
 use crate::util::stx::prelude::*;
 
@@ -30,7 +32,7 @@ pub trait ToStr: Sized {
 
     #[inline]
     fn into_string(self) -> String {
-        let mut b = [0u8; 21];
+        let mut b = [0u8; 20];
         self.into_str(&mut b).to_string()
     }
 }
@@ -41,7 +43,7 @@ pub trait ToStrHex: ToStr {
 
     #[inline]
     fn into_hex_string(self) -> String {
-        let mut b = [0u8; 20];
+        let mut b = [0u8; 16];
         self.into_hex_str(&mut b).to_string()
     }
 }
@@ -49,280 +51,282 @@ pub trait ToStrHex: ToStr {
 impl ToStr for i8 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStr for u8 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStrHex for u8 {
     #[inline]
     fn into_hex_vec(self, buf: &mut Vec<u8>) {
-        uint8_hex_to_vec(buf, self)
+        u8_hex_vec(buf, self)
     }
     #[inline]
     fn into_hex_buf(self, buf: &mut [u8]) -> usize {
-        uint_hex_to_buf(buf, self as u64)
+        uint_hex(buf, self as u64)
     }
     #[inline]
     fn into_hex_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint8_hex_to_str(buf, self)
+        u8_hex_str(buf, self)
     }
 }
 
 impl ToStr for i16 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStr for u16 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStrHex for u16 {
     #[inline]
     fn into_hex_vec(self, buf: &mut Vec<u8>) {
-        uint_hex_to_vec(buf, self as u64)
+        uint_hex_vec(buf, self as u64)
     }
     #[inline]
     fn into_hex_buf(self, buf: &mut [u8]) -> usize {
-        uint_hex_to_buf(buf, self as u64)
+        uint_hex(buf, self as u64)
     }
     #[inline]
     fn into_hex_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_hex_to_str(buf, self as u64)
+        uint_hex_str(buf, self as u64)
     }
 }
 
 impl ToStr for i32 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStr for u32 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStrHex for u32 {
     #[inline]
     fn into_hex_vec(self, buf: &mut Vec<u8>) {
-        uint_hex_to_vec(buf, self as u64)
+        uint_hex_vec(buf, self as u64)
     }
     #[inline]
     fn into_hex_buf(self, buf: &mut [u8]) -> usize {
-        uint_hex_to_buf(buf, self as u64)
+        uint_hex(buf, self as u64)
     }
     #[inline]
     fn into_hex_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_hex_to_str(buf, self as u64)
+        uint_hex_str(buf, self as u64)
     }
 }
 
 impl ToStr for i64 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStr for u64 {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self)
+        uint_vec(buf, self)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self)
+        uint(buf, self)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self)
+        uint_str(buf, self)
     }
 }
 impl ToStrHex for u64 {
     #[inline]
     fn into_hex_vec(self, buf: &mut Vec<u8>) {
-        uint_hex_to_vec(buf, self)
+        uint_hex_vec(buf, self)
     }
     #[inline]
     fn into_hex_buf(self, buf: &mut [u8]) -> usize {
-        uint_hex_to_buf(buf, self)
+        uint_hex(buf, self)
     }
     #[inline]
     fn into_hex_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_hex_to_str(buf, self)
+        uint_hex_str(buf, self)
     }
 }
 
 impl ToStr for isize {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStr for usize {
     #[inline]
     fn into_vec(self, buf: &mut Vec<u8>) {
-        uint_to_vec(buf, self as u64)
+        uint_vec(buf, self as u64)
     }
     #[inline]
     fn into_buf(self, buf: &mut [u8]) -> usize {
-        uint_to_buf(buf, self as u64)
+        uint(buf, self as u64)
     }
     #[inline]
     fn into_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_to_str(buf, self as u64)
+        uint_str(buf, self as u64)
     }
 }
 impl ToStrHex for usize {
     #[inline]
     fn into_hex_vec(self, buf: &mut Vec<u8>) {
-        uint_hex_to_vec(buf, self as u64)
+        uint_hex_vec(buf, self as u64)
     }
     #[inline]
     fn into_hex_buf(self, buf: &mut [u8]) -> usize {
-        uint_hex_to_buf(buf, self as u64)
+        uint_hex(buf, self as u64)
     }
     #[inline]
     fn into_hex_str<'a>(self, buf: &'a mut [u8]) -> &'a str {
-        uint_hex_to_str(buf, self as u64)
+        uint_hex_str(buf, self as u64)
     }
 }
 
 #[inline]
-fn uint_to_vec(buf: &mut Vec<u8>, v: u64) {
-    let n = buf.len();
-    buf.resize(n + 21, 0);
-    let r = uint_to_buf(&mut buf[n..], v);
-    buf.truncate(n + r);
-}
-#[inline]
-fn uint_hex_to_vec(buf: &mut Vec<u8>, v: u64) {
+fn uint_vec(buf: &mut Vec<u8>, v: u64) {
     let n = buf.len();
     buf.resize(n + 20, 0);
-    let r = uint_hex_to_buf(&mut buf[n..], v);
-    buf.truncate(n + r);
+    let mut t = [0u8; 20];
+    let r = _uint(&mut t, v);
+    let i = util::copy(&mut buf[n..], &t[r..]);
+    buf.truncate(n + i);
 }
 #[inline]
-fn uint8_hex_to_vec(buf: &mut Vec<u8>, v: u8) {
+fn u8_hex_vec(buf: &mut Vec<u8>, v: u8) {
     let n = buf.len();
     buf.resize(n + 2, 0);
-    let r = uint8_hex_to_buf(&mut buf[n..], v);
+    let r = u8_hex(&mut buf[n..], v);
     buf.truncate(n + r);
 }
-fn uint_to_buf(buf: &mut [u8], v: u64) -> usize {
-    if buf.len() < 21 {
-        // fix to cacul;ate the size based on the resize value
-        return 0;
+fn uint(out: &mut [u8], v: u64) -> usize {
+    // Copy into the out buffer, but order them so the chars are at the beginning
+    // of the slice.
+    // Return the amount of chars placed.
+    let t = out.len();
+    match v {
+        0 if t < 1 => return 0,
+        0 => {
+            out[0] = b'0';
+            return 1;
+        },
+        0..=255 if t < 3 => return 0,
+        255..=65535 if t < 5 => return 0,
+        65535..=4294967295 if t < 10 => return 0,
+        4294967295..=18446744073709551615 if t < 20 => return 0,
+        _ => (),
     }
-    if v == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-    let mut b = [0u8; 21];
-    let (mut i, mut v) = (20, v);
-    while v >= 10 {
-        let n = v / 10;
-        b[i] = b'0' + (v - (n * 10)) as u8;
-        i -= 1;
-        v = n;
-    }
-    b[i] = b'0' + v as u8;
-    util::copy(buf, &b[i..])
+    let mut t = [0u8; 20];
+    let r = _uint(&mut t, v);
+    util::copy(out, &t[r..])
 }
-fn uint_hex_to_buf(buf: &mut [u8], v: u64) -> usize {
+fn _uint(buf: &mut [u8], v: u64) -> usize {
+    // Let buf be our backing store for chars.
+    // Chars are ordered at the end of the 20bytes length.
+    // Return the first char position in the slice.
     if buf.len() < 20 {
         return 0;
     }
     if v == 0 {
-        buf[0] = b'0';
-        return 1;
+        buf[19] = b'0';
+        return 19;
     }
-    let (mut b, mut i) = ([0u8; 20], 19);
+    let (mut x, mut i) = (v, 19);
     loop {
-        let n = (v >> (4 * (19 - i))) as usize;
-        b[i] = HEXTABLE[n & 0xF];
+        let y = x / 10;
+        buf[i] = b'0' + (x - (y * 10)) as u8;
         i -= 1;
-        if n <= 0xF {
+        x = y;
+        if y < 10 {
             break;
         }
     }
-    util::copy(buf, &b[i + 1..])
+    buf[i] = b'0' + x as u8;
+    i
 }
 #[inline]
-fn uint8_hex_to_buf(buf: &mut [u8], v: u8) -> usize {
+fn u8_hex(buf: &mut [u8], v: u8) -> usize {
+    // u8 to hex chars is a very simple conversion and is seperated for speed.
     if buf.len() < 2 {
         return 0;
     }
@@ -337,63 +341,74 @@ fn uint8_hex_to_buf(buf: &mut [u8], v: u8) -> usize {
     }
     1
 }
-fn uint_to_str<'a>(buf: &'a mut [u8], v: u64) -> &'a str {
-    if buf.len() < 21 {
-        return unsafe { core::str::from_utf8_unchecked(buf) };
-    }
-    if v == 0 {
-        buf[0] = b'0';
-        unsafe { core::str::from_utf8_unchecked(&buf[0..1]) };
-    }
-    let (mut i, mut v) = (buf.len() - 1, v);
-    while v >= 10 {
-        let n = v / 10;
-        buf[i] = b'0' + (v - (n * 10)) as u8;
-        i -= 1;
-        v = n;
-    }
-    buf[i] = b'0' + v as u8;
-    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
+#[inline]
+fn uint_hex_vec(buf: &mut Vec<u8>, v: u64) {
+    let n = buf.len();
+    buf.resize(n + 16, 0);
+    let mut t = [0u8; 16];
+    let r = _uint(&mut t, v);
+    let i = util::copy(&mut buf[n..], &t[r..]);
+    buf.truncate(n + i);
 }
-fn uint_hex_to_str<'a>(buf: &'a mut [u8], v: u64) -> &'a str {
-    if buf.len() < 20 {
-        return unsafe { core::str::from_utf8_unchecked(buf) };
+fn uint_hex(out: &mut [u8], v: u64) -> usize {
+    // Copy into the out buffer, but order them so the chars are at the beginning
+    // of the slice.
+    // Return the amount of chars placed.
+    let t = out.len();
+    match v {
+        0 if t < 1 => return 0,
+        0 => {
+            out[0] = b'0';
+            return 1;
+        },
+        0..=0xFF if t < 2 => return 0,
+        0xFF..=0xFFFF if t < 4 => return 0,
+        0xFFFF..=0xFFFFFFFF if t < 8 => return 0,
+        0xFFFFFFFF..=0xFFFFFFFFFFFFFFFF if t < 16 => return 0,
+        _ => (),
+    }
+    let mut t = [0u8; 16];
+    let r = _uint_hex(&mut t, v);
+    util::copy(out, &t[r..])
+}
+fn _uint_hex(buf: &mut [u8], v: u64) -> usize {
+    // Let buf be our backing store for chars.
+    // Chars are ordered at the end of the 16bytes length.
+    // Return the first char position in the slice.
+    if buf.len() < 16 {
+        return 0;
     }
     if v == 0 {
-        buf[0] = b'0';
-        unsafe { core::str::from_utf8_unchecked(&buf[0..1]) };
+        buf[15] = b'0';
+        return 15;
     }
-    let t = buf.len() - 1;
-    let mut i = t;
-    loop {
-        let n = (v >> (4 * (t - i))) as usize;
-        buf[i] = HEXTABLE[n & 0xF];
+    let (mut n, mut i) = (v as usize, 16);
+    while n > 0xF {
+        n = (v >> (4 * (16 - i))) as usize;
         i -= 1;
-        if n <= 0xF {
-            break;
-        }
+        buf[i] = HEXTABLE[n & 0xF];
     }
-    unsafe { core::str::from_utf8_unchecked(&buf[i + 1..]) }
+    i
 }
 #[inline]
-fn uint8_hex_to_str<'a>(buf: &'a mut [u8], v: u8) -> &'a str {
-    if buf.len() < 2 {
-        return unsafe { core::str::from_utf8_unchecked(buf) };
-    }
-    let r = match v {
-        0 => {
-            buf[0] = b'0';
-            1
-        },
-        1..=16 => {
-            buf[0] = HEXTABLE[(v as usize) & 0x0F];
-            1
-        },
-        _ => {
-            buf[0] = HEXTABLE[(v as usize) >> 4];
-            buf[1] = HEXTABLE[(v as usize) & 0x0F];
-            2
-        },
-    };
+fn uint_str<'a>(buf: &'a mut [u8], v: u64) -> &'a str {
+    // Copy into the buf buffer provided. Order is still at the end of the slice.
+    // Return the a str pointer that starts at the char start index.
+    // Saves from an additional memcpy.
+    let r = _uint(buf, v);
+    unsafe { core::str::from_utf8_unchecked(&buf[r..cmp::min(20, buf.len())]) }
+}
+#[inline]
+fn u8_hex_str<'a>(buf: &'a mut [u8], v: u8) -> &'a str {
+    // u8 to hex chars is a very simple conversion and is seperated for speed.
+    let r = u8_hex(buf, v);
     unsafe { core::str::from_utf8_unchecked(&buf[0..r]) }
+}
+#[inline]
+fn uint_hex_str<'a>(buf: &'a mut [u8], v: u64) -> &'a str {
+    // Copy into the buf buffer provided. Order is still at the end of the slice.
+    // Return the a str pointer that starts at the char start index.
+    // Saves from an additional memcpy.
+    let r = _uint_hex(buf, v);
+    unsafe { core::str::from_utf8_unchecked(&buf[r..cmp::min(16, buf.len())]) }
 }
