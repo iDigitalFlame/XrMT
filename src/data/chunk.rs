@@ -41,75 +41,10 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        self.buf.reserve(additional)
-    }
-    #[inline]
-    pub fn reserve_exact(&mut self, additional: usize) {
-        self.buf.reserve_exact(additional)
-    }
-    #[inline]
-    pub fn shrink_to_fit(&mut self) {
-        self.buf.shrink_to_fit()
-    }
-    #[inline]
-    pub fn shrink_to(&mut self, min_capacity: usize) {
-        self.buf.shrink_to(min_capacity)
-    }
-    #[inline]
-    pub fn truncate(&mut self, len: usize) {
-        self.buf.truncate(len)
-    }
-    #[inline]
-    pub fn as_slice(&self) -> &[u8] {
-        &self.buf[self.rpos..]
-    }
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.buf[self.rpos..]
-    }
-    #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        self.buf.as_ptr()
-    }
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buf.as_mut_ptr()
-    }
-
-    #[inline]
-    pub fn push(&mut self, value: u8) {
-        self.buf.push(value)
-    }
-
-    #[inline]
-    pub fn append(&mut self, other: &mut impl AsMut<Vec<u8>>) -> io::Result<()> {
-        let v = other.as_mut();
-        self.check_avaliable(v.len())?;
-        self.buf.append(v);
-        Ok(())
-    }
-
-    #[inline]
     pub fn clear(&mut self) {
         self.buf.clear();
         self.rpos = 0;
     }
-
-    #[inline]
-    pub fn resize(&mut self, new_len: usize, value: u8) -> io::Result<()> {
-        self.check_avaliable(new_len)?;
-        self.buf.resize(new_len, value);
-        Ok(())
-    }
-
-    #[inline]
-    pub fn extend_from_slice(&mut self, other: &[u8]) -> io::Result<()> {
-        self.check_avaliable(other.len())?;
-        self.buf.extend_from_slice(other);
-        Ok(())
-    }
-
     #[inline]
     pub fn len(&self) -> usize {
         self.buf.len() - self.rpos
@@ -139,6 +74,14 @@ impl Chunk {
         &self.buf
     }
     #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[self.rpos..]
+    }
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.buf.shrink_to_fit()
+    }
+    #[inline]
     pub fn remaining(&self) -> usize {
         if self.is_empty() {
             0
@@ -147,8 +90,24 @@ impl Chunk {
         }
     }
     #[inline]
+    pub fn push(&mut self, value: u8) {
+        self.buf.push(value)
+    }
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.buf.as_ptr()
+    }
+    #[inline]
     pub fn grow(&mut self, len: usize) {
         self.buf.reserve(len - self.len())
+    }
+    #[inline]
+    pub fn truncate(&mut self, len: usize) {
+        self.buf.truncate(len)
+    }
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.buf.as_mut_ptr()
     }
     #[inline]
     pub fn as_vec(&mut self) -> &mut Vec<u8> {
@@ -161,6 +120,41 @@ impl Chunk {
         } else {
             self.buf.len() + n <= self.limit as usize
         }
+    }
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.buf[self.rpos..]
+    }
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(additional)
+    }
+    #[inline]
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.buf.shrink_to(min_capacity)
+    }
+    #[inline]
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.buf.reserve_exact(additional)
+    }
+    #[inline]
+    pub fn extend_from_slice(&mut self, other: &[u8]) -> io::Result<()> {
+        self.check_avaliable(other.len())?;
+        self.buf.extend_from_slice(other);
+        Ok(())
+    }
+    #[inline]
+    pub fn resize(&mut self, new_len: usize, value: u8) -> io::Result<()> {
+        self.check_avaliable(new_len)?;
+        self.buf.resize(new_len, value);
+        Ok(())
+    }
+    #[inline]
+    pub fn append(&mut self, other: &mut impl AsMut<Vec<u8>>) -> io::Result<()> {
+        let v = other.as_mut();
+        self.check_avaliable(v.len())?;
+        self.buf.append(v);
+        Ok(())
     }
 
     #[inline]
