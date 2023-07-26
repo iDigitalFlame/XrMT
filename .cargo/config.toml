@@ -1,0 +1,4 @@
+[target.'cfg(target_family = "windows")']
+rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "linker=lld-link", "-C", "link-arg=/SUBSYSTEM:CONSOLE,5.01", "-C", "link-arg=/nodefaultlib", "-C", "link-arg=/entry:_main"]
+
+# Keeping for reference: "-C", "link-arg=/emittoolversioninfo:no",

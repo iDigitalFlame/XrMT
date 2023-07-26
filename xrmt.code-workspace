@@ -1,0 +1,18 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "cSpell.words": [
+            "amsi",
+            "Amsi",
+            "dbghelp",
+            "rustfmt",
+            "TITLEISAPPID",
+            "wtsapi",
+            "WTSAPI"
+        ]
+    }
+}
