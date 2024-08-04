@@ -16,17 +16,21 @@
 
 #![no_implicit_prelude]
 
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 use core::cmp;
-use core::ops::Deref;
+use core::ops::{Deref, DerefMut};
+use core::str::from_utf8_unchecked;
 
+use crate::com::Packet;
 use crate::data::{Readable, Reader, Writable, Writer};
+use crate::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use crate::prelude::*;
 use crate::util::crypt;
-use crate::util::stx::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
-use crate::util::stx::prelude::*;
 
-pub struct Chunk {
+pub struct Chunk<A: Allocator = Global> {
     pub limit: usize,
-    buf:       Vec<u8>,
+    buf:       Vec<u8, A>,
     rpos:      usize,
 }
 
@@ -35,8 +39,18 @@ impl Chunk {
     pub const fn new() -> Chunk {
         Chunk {
             buf:   Vec::new(),
-            rpos:  0,
-            limit: 0,
+            rpos:  0usize,
+            limit: 0usize,
+        }
+    }
+}
+impl<A: Allocator> Chunk<A> {
+    #[inline]
+    pub const fn new_in(alloc: A) -> Chunk<A> {
+        Chunk {
+            buf:   Vec::new_in(alloc),
+            rpos:  0usize,
+            limit: 0usize,
         }
     }
 
@@ -67,7 +81,7 @@ impl Chunk {
     }
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.buf.is_empty()
     }
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
@@ -106,12 +120,12 @@ impl Chunk {
         self.buf.truncate(len)
     }
     #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buf.as_mut_ptr()
+    pub fn extend(&mut self, other: &[u8]) {
+        self.buf.extend_from_slice(other)
     }
     #[inline]
-    pub fn as_vec(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.buf.as_mut_ptr()
     }
     #[inline]
     pub fn avaliable(&self, n: usize) -> bool {
@@ -130,6 +144,10 @@ impl Chunk {
         self.buf.reserve(additional)
     }
     #[inline]
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8, A> {
+        &mut self.buf
+    }
+    #[inline]
     pub fn shrink_to(&mut self, min_capacity: usize) {
         self.buf.shrink_to(min_capacity)
     }
@@ -138,9 +156,54 @@ impl Chunk {
         self.buf.reserve_exact(additional)
     }
     #[inline]
+    pub fn try_extend_slice(&mut self, other: &[u8]) -> Option<usize> {
+        let r = self.space();
+        if r == 0 {
+            return None;
+        }
+        let t = cmp::max(other.len(), r);
+        self.buf.extend_from_slice(&other[0..t]);
+        Some(t)
+    }
+    #[inline]
+    pub fn write_u8_at(&mut self, pos: usize, v: u8) -> io::Result<()> {
+        if pos >= self.size() || pos + 1 >= self.size() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        self.buf[pos] = v;
+        Ok(())
+    }
+    #[inline]
     pub fn extend_from_slice(&mut self, other: &[u8]) -> io::Result<()> {
         self.check_avaliable(other.len())?;
         self.buf.extend_from_slice(other);
+        Ok(())
+    }
+    #[inline]
+    pub fn write_u16_at(&mut self, pos: usize, v: u16) -> io::Result<()> {
+        if pos >= self.size() || pos + 2 >= self.size() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let b = v.to_be_bytes();
+        self.buf[pos..pos + 2].copy_from_slice(&b);
+        Ok(())
+    }
+    #[inline]
+    pub fn write_u32_at(&mut self, pos: usize, v: u32) -> io::Result<()> {
+        if pos >= self.size() || pos + 4 >= self.size() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let b = v.to_be_bytes();
+        self.buf[pos..pos + 4].copy_from_slice(&b);
+        Ok(())
+    }
+    #[inline]
+    pub fn write_u64_at(&mut self, pos: usize, v: u64) -> io::Result<()> {
+        if pos >= self.size() || pos + 8 >= self.size() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let b = v.to_be_bytes();
+        self.buf[pos..pos + 8].copy_from_slice(&b);
         Ok(())
     }
     #[inline]
@@ -150,11 +213,31 @@ impl Chunk {
         Ok(())
     }
     #[inline]
-    pub fn append(&mut self, other: &mut impl AsMut<Vec<u8>>) -> io::Result<()> {
+    pub fn append(&mut self, other: &mut impl AsMut<Vec<u8, A>>) -> io::Result<()> {
         let v = other.as_mut();
         self.check_avaliable(v.len())?;
         self.buf.append(v);
         Ok(())
+    }
+
+    pub fn read_str_ptr(&mut self) -> io::Result<Option<&str>> {
+        let n = match self.read_u8()? {
+            0 => return Ok(None),
+            1 | 2 => self.read_u8()? as usize,
+            3 | 4 => self.read_u16()? as usize,
+            5 | 6 => self.read_u32()? as usize,
+            7 | 8 => self.read_u64()? as usize,
+            _ => return Err(ErrorKind::InvalidData.into()),
+        };
+        if (n as isize) <= 0 || (n as isize) >= isize::MAX {
+            return Err(ErrorKind::FileTooLarge.into());
+        }
+        if self.len() < n {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        let b = &self.buf[self.rpos..self.rpos + n];
+        self.rpos += n;
+        Ok(Some(unsafe { from_utf8_unchecked(b) }))
     }
 
     #[inline]
@@ -170,20 +253,38 @@ impl Chunk {
     }
 }
 
-impl Drop for Chunk {
+impl Default for Chunk {
     #[inline]
-    fn drop(&mut self) {
-        self.buf.shrink_to(0);
+    fn default() -> Chunk {
+        Chunk {
+            buf:   Vec::new(),
+            rpos:  0usize,
+            limit: 0usize,
+        }
     }
 }
-impl Read for Chunk {
+impl From<&[u8]> for Chunk {
+    #[inline]
+    fn from(v: &[u8]) -> Chunk {
+        let mut c = Chunk::new();
+        c.extend(v);
+        c
+    }
+}
+impl<A: Allocator> Drop for Chunk<A> {
+    #[inline]
+    fn drop(&mut self) {
+        self.buf.shrink_to(0)
+    }
+}
+impl<A: Allocator> Read for Chunk<A> {
     #[inline]
     fn is_read_vectored(&self) -> bool {
         false
     }
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.buf.len() == 0 {
+        if self.buf.is_empty() {
             return Ok(0);
         }
         let n = cmp::min(buf.len(), self.len());
@@ -192,7 +293,7 @@ impl Read for Chunk {
         Ok(n)
     }
 }
-impl Seek for Chunk {
+impl<A: Allocator> Seek for Chunk<A> {
     #[inline]
     fn stream_len(&mut self) -> io::Result<u64> {
         Ok(self.buf.len() as u64)
@@ -215,7 +316,7 @@ impl Seek for Chunk {
         Ok(n)
     }
 }
-impl Write for Chunk {
+impl<A: Allocator> Write for Chunk<A> {
     #[inline]
     fn is_write_vectored(&self) -> bool {
         false
@@ -231,11 +332,11 @@ impl Write for Chunk {
             return Ok(0);
         }
         self.check_avaliable(n)?;
-        self.buf.write(buf)?;
+        self.extend_from_slice(buf)?;
         Ok(n)
     }
 }
-impl Deref for Chunk {
+impl<A: Allocator> Deref for Chunk<A> {
     type Target = [u8];
 
     #[inline]
@@ -243,54 +344,44 @@ impl Deref for Chunk {
         &self.buf
     }
 }
-impl Clone for Chunk {
+impl<A: Allocator> Reader for Chunk<A> {
     #[inline]
-    fn clone(&self) -> Chunk {
-        Chunk {
-            buf:   self.buf.clone(),
-            rpos:  0,
-            limit: self.limit,
+    fn read_i8(&mut self) -> io::Result<i8> {
+        if self.buf.is_empty() || self.len() <= 1 {
+            return Ok(0);
         }
+        let v = self.buf[self.rpos];
+        self.rpos += 1;
+        Ok(v as i8)
     }
-}
-impl Reader for Chunk {}
-impl Writer for Chunk {}
-impl Default for Chunk {
     #[inline]
-    fn default() -> Chunk {
-        Chunk {
-            buf:   Vec::new(),
-            rpos:  0,
-            limit: 0,
+    fn read_u8(&mut self) -> io::Result<u8> {
+        if self.buf.is_empty() || self.len() <= 1 {
+            return Ok(0);
         }
+        let v = self.buf[self.rpos];
+        self.rpos += 1;
+        Ok(v)
     }
 }
-impl AsRef<[u8]> for Chunk {
+impl<A: Allocator> Writer for Chunk<A> {
     #[inline]
-    fn as_ref(&self) -> &[u8] {
-        &self.buf
+    fn write_i8(&mut self, v: i8) -> io::Result<()> {
+        self.buf.push(v as u8);
+        Ok(())
+    }
+    fn write_u8(&mut self, v: u8) -> io::Result<()> {
+        self.buf.push(v);
+        Ok(())
     }
 }
-impl AsRef<Vec<u8>> for Chunk {
-    #[inline]
-    fn as_ref(&self) -> &Vec<u8> {
-        &self.buf
-    }
-}
-impl AsMut<Vec<u8>> for Chunk {
-    #[inline]
-    fn as_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
-    }
-}
-
-impl Writable for Chunk {
+impl<A: Allocator> Writable for Chunk<A> {
     #[inline]
     fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
         w.write_bytes(&self.buf[self.rpos..])
     }
 }
-impl Readable for Chunk {
+impl<A: Allocator> Readable for Chunk<A> {
     #[inline]
     fn read_stream(&mut self, r: &mut impl Reader) -> io::Result<()> {
         r.read_into_vec(&mut self.buf)?;
@@ -298,15 +389,66 @@ impl Readable for Chunk {
         Ok(())
     }
 }
+impl<A: Allocator> DerefMut for Chunk<A> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.buf
+    }
+}
+impl<A: Allocator> AsRef<[u8]> for Chunk<A> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.buf
+    }
+}
+impl<A: Allocator> From<Packet<A>> for Chunk<A> {
+    #[inline]
+    fn from(v: Packet<A>) -> Chunk<A> {
+        v.data
+    }
+}
+impl<A: Allocator> From<Vec<u8, A>> for Chunk<A> {
+    #[inline]
+    fn from(v: Vec<u8, A>) -> Chunk<A> {
+        Chunk {
+            buf:   v,
+            rpos:  0usize,
+            limit: 0usize,
+        }
+    }
+}
+impl<A: Allocator> AsRef<Vec<u8, A>> for Chunk<A> {
+    #[inline]
+    fn as_ref(&self) -> &Vec<u8, A> {
+        &self.buf
+    }
+}
+impl<A: Allocator> AsMut<Vec<u8, A>> for Chunk<A> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut Vec<u8, A> {
+        &mut self.buf
+    }
+}
+impl<A: Allocator + Copy + Clone> Clone for Chunk<A> {
+    #[inline]
+    fn clone(&self) -> Chunk<A> {
+        Chunk {
+            buf:   self.buf.clone(),
+            rpos:  0,
+            limit: self.limit,
+        }
+    }
+}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
+    use core::alloc::Allocator;
     use core::fmt::{self, Debug, Display, Formatter};
 
-    use super::Chunk;
-    use crate::util::stx::prelude::*;
+    use crate::data::Chunk;
+    use crate::prelude::*;
 
-    impl Debug for Chunk {
+    impl<A: Allocator> Debug for Chunk<A> {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             f.debug_struct("Chunk")
@@ -316,7 +458,7 @@ mod display {
                 .finish()
         }
     }
-    impl Display for Chunk {
+    impl<A: Allocator> Display for Chunk<A> {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             Debug::fmt(&self.buf, f)

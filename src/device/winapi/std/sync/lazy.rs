@@ -15,16 +15,17 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
+use core::hint::spin_loop;
+use core::ptr;
 use core::sync::atomic::{AtomicU8, Ordering};
-use core::{hint, ptr};
 
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
-const STATE_NEW: u8 = 0;
-const STATE_INIT: u8 = 1;
-const STATE_READY: u8 = 2;
+const STATE_NEW: u8 = 0u8;
+const STATE_INIT: u8 = 1u8;
+const STATE_READY: u8 = 2u8;
 
 pub struct Lazy(AtomicU8);
 
@@ -69,7 +70,7 @@ impl Lazy {
                 STATE_INIT => {
                     while self.0.load(Ordering::Acquire) == STATE_INIT {
                         unsafe { ptr::read_volatile(&self.0) }; // Prevent optimization of loop.
-                        hint::spin_loop()
+                        spin_loop()
                     }
                 },
                 _ => (),

@@ -15,24 +15,29 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use alloc::boxed::Box;
 use alloc::collections::{btree_map, BTreeMap};
+use alloc::vec;
 use core::error::Error;
 use core::fmt::{self, Debug, Display, Formatter};
+use core::hint::spin_loop;
+use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
+use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
-use core::{hint, mem, slice};
 
 use crate::data::blob::Blob;
-use crate::device::fs::File;
-use crate::device::winapi::{self, AsHandle, Handle, MaybeString, Overlapped, OwnedHandle, ProcessBasicInfo, ProcessInfo, ProcessThreadAttrList, SecurityAttributes, StartInfo, StartupInfo, StartupInfoEx, StringBlock, WChar, Win32Error};
-use crate::device::{env, fs};
+use crate::data::str::MaybeString;
+use crate::device::winapi::{self, AsHandle, Handle, Overlapped, OwnedHandle, ProcessBasicInfo, ProcessInfo, ProcessThreadAttrList, SecurityAttributes, StartInfo, StartupInfo, StartupInfoEx, StringBlock, WChar, Win32Error};
+use crate::env::split_paths;
+use crate::ffi::OsStr;
+use crate::fs::{exists, File};
+use crate::ignore_error;
+use crate::io::{self, ErrorKind, Read};
+use crate::path::Path;
+use crate::prelude::*;
 use crate::process::{ChildExtra, Filter, MaybeFilter};
-use crate::util::stx::ffi::{OsStr, Path};
-use crate::util::stx::io::{self, ErrorKind, Read};
-use crate::util::stx::prelude::*;
 use crate::util::{crypt, ToStr};
 
 const PATHEXT: [u16; 7] = [
@@ -45,7 +50,7 @@ const PATHEXT: [u16; 7] = [
     b'T' as u16,
 ];
 
-static VERSION: AtomicU8 = AtomicU8::new(0);
+static VERSION: AtomicU8 = AtomicU8::new(0u8);
 
 pub enum Arg {
     Raw(String),
@@ -71,27 +76,27 @@ pub struct Output {
     pub stderr: Vec<u8>,
 }
 pub struct Command {
-    pub dir:      Option<String>,
-    pub args:     Vec<Arg>,
-    force_quotes: bool,
-    split:        bool,
+    dir:          Option<String>,
     env:          BTreeMap<String, String>,
-    title:        Option<String>,
+    args:         Vec<Arg>,
+    split:        bool,
     stdin:        Stdio,
     stdout:       Stdio,
     stderr:       Stdio,
     filter:       Option<Filter>,
+    token:        OwnedHandle,
+    title:        Option<String>,
+    mode:         u16,
     user:         Option<String>,
     pass:         Option<String>,
     domain:       Option<String>,
-    token:        OwnedHandle,
-    mode:         u16,
     flags:        u32,
-    start_flags:  u32,
     start_x:      u32,
     start_y:      u32,
+    start_flags:  u32,
     start_width:  u32,
     start_height: u32,
+    force_quotes: bool,
 }
 pub struct ChildStdout {
     file:    OwnedHandle,
@@ -146,16 +151,11 @@ pub trait ExitStatusExt {
     fn from_raw(raw: u32) -> ExitStatus;
 }
 
-pub type ThreadEntry = winapi::ThreadEntry;
-pub type ProcessEntry = winapi::ProcessEntry;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum PipeType {
     Stdin,
     Stdout,
     Stderr,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum StdioType {
     Null,
     Inherit,
@@ -267,22 +267,16 @@ impl Stdio {
             StdioType::Inherit => Ok((Stdio::inherit_pipe(pipe, parent)?, None)),
             StdioType::Pipe => {
                 let x = SecurityAttributes::inherit();
-                let (r, w) = winapi::CreatePipe(Some(&x), 0x10000).map_err(io::Error::from)?;
+                let (r, w) = winapi::CreatePipe(Some(&x), 0x10000)?;
                 match pipe {
                     PipeType::Stdin if parent == winapi::CURRENT_PROCESS => Ok((Handle::take(r), Some(w))),
-                    PipeType::Stdin => Ok((
-                        r.into_duplicate(true, parent).map_err(io::Error::from)?,
-                        Some(w),
-                    )),
+                    PipeType::Stdin => Ok((r.into_duplicate(true, parent)?, Some(w))),
                     _ if parent == winapi::CURRENT_PROCESS => Ok((Handle::take(w), Some(r))),
-                    _ => Ok((
-                        w.into_duplicate(true, parent).map_err(io::Error::from)?,
-                        Some(r),
-                    )),
+                    _ => Ok((w.into_duplicate(true, parent)?, Some(r))),
                 }
             },
             StdioType::Handle => Ok((
-                winapi::DuplicateHandleEx(&self.h, winapi::CURRENT_PROCESS, parent, 0, true, 0x2).map_err(io::Error::from)?,
+                winapi::DuplicateHandleEx(&self.h, winapi::CURRENT_PROCESS, parent, 0, true, 0x2)?,
                 None,
             )),
         }
@@ -293,7 +287,7 @@ impl Stdio {
         let sa = SecurityAttributes::inherit();
         let n = winapi::NtCreateFile(
             crypt::get_or(0, r"\??\NUL"),
-            winapi::INVALID,
+            Handle::INVALID,
             if pipe == PipeType::Stdin {
                 0x80100080
             } else {
@@ -304,8 +298,7 @@ impl Stdio {
             0x3,
             0x1,
             0,
-        )
-        .map_err(io::Error::from)?;
+        )?;
         if parent == winapi::CURRENT_PROCESS {
             Ok(Handle::take(n))
         } else {
@@ -314,7 +307,7 @@ impl Stdio {
     }
     #[inline]
     fn inherit_pipe(pipe: PipeType, parent: Handle) -> io::Result<Handle> {
-        let p = unsafe { (*winapi::GetCurrentProcessPEB()).process_parameters.as_ref() }.ok_or_else(|| io::Error::from(ErrorKind::PermissionDenied))?;
+        let p = winapi::GetCurrentProcessPEB().process_params();
         match pipe {
             PipeType::Stdin if !p.standard_input.is_invalid() => {
                 // NOTE(dij): Until Win8 we can't duplicate a STDIN Handle for
@@ -362,7 +355,7 @@ impl Stdio {
             (false, true) => (0x40100000, 0x4, 0x2),
             _ => (0xC0100000, 0x3, 0x3),
         };
-        winapi::NtCreateFile(path, winapi::INVALID, a | 0x10000, None, 0, s, d, 0x20).map_err(io::Error::from)
+        winapi::NtCreateFile(path, Handle::INVALID, a | 0x10000, None, 0, s, d, 0x20).map_err(io::Error::from)
     }
 }
 impl Child {
@@ -387,23 +380,22 @@ impl Child {
         // Calls to this function when the process is running is similar to
         // 'wait' except this will ALWAYS return an ExitStatus even during
         // failure.
-        let _ = winapi::WaitForSingleAsHandle(&self.info.process, -1, false); // IGNORE ERROR
-                                                                              // ^ The wait is up here as we should make everyone wait instead of one
-                                                                              // winning the race and waiting while the loosers return a bogus result.
+        ignore_error!(winapi::WaitForSingleObject(&self.info.process, -1, false));
+        // ^ The wait is up here as we should make everyone wait instead of one
+        // winning the race and waiting while the loosers return a bogus result.
         if self
             .done
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
             let mut i = ProcessBasicInfo::default();
-            // IGNORE ERROR
             // 0x0 - ProcessBasicInformation
-            let _ = winapi::NtQueryInformationProcess(
+            ignore_error!(winapi::NtQueryInformationProcess(
                 &self.info.process,
                 0,
                 &mut i,
-                mem::size_of::<ProcessBasicInfo>() as u32,
-            );
+                size_of::<ProcessBasicInfo>() as u32,
+            ));
             self.exit.store(i.exit_status as i32, Ordering::Release);
         }
         ExitStatus(self.exit.load(Ordering::Relaxed))
@@ -412,7 +404,7 @@ impl Child {
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         // Close Stdin Handle.
         drop(self.stdin.take());
-        winapi::WaitForSingleAsHandle(&self.info.process, -1, false)
+        winapi::WaitForSingleObject(&self.info.process, -1, false)
             .map_err(io::Error::from)
             .map(|_| self.exit_code())
     }
@@ -428,7 +420,7 @@ impl Child {
     }
     #[inline]
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        winapi::WaitForSingleAsHandle(&self.info.process, 0, false)
+        winapi::WaitForSingleObject(&self.info.process, 0, false)
             .map_err(io::Error::from)
             .map(|v| if v == 0 { Some(self.exit_code()) } else { None })
     }
@@ -472,11 +464,11 @@ impl Command {
             dir:          None,
             env:          BTreeMap::new(),
             args:         vec![Arg::raw(exe)],
-            mode:         0,
+            mode:         0u16,
             pass:         None,
             user:         None,
             split:        false,
-            flags:        0,
+            flags:        0u32,
             token:        OwnedHandle::empty(),
             title:        None,
             stdin:        Stdio::inherit(),
@@ -484,11 +476,11 @@ impl Command {
             stderr:       Stdio::inherit(),
             domain:       None,
             filter:       None,
-            start_x:      0,
-            start_y:      0,
-            start_flags:  0,
-            start_width:  0,
-            start_height: 0,
+            start_x:      0u32,
+            start_y:      0u32,
+            start_flags:  0u32,
+            start_width:  0u32,
+            start_height: 0u32,
             force_quotes: false,
         }
     }
@@ -568,7 +560,7 @@ impl Command {
     }
     #[inline]
     pub fn args<V: AsRef<OsStr>>(&mut self, args: impl IntoIterator<Item = V>) -> &mut Command {
-        self.args.extend(args.into_iter().map(|i| Arg::new(i)));
+        self.args.extend(args.into_iter().map(Arg::new));
         self
     }
     #[inline]
@@ -582,7 +574,7 @@ impl Command {
         self
     }
 
-    #[allow(unused)] // TODO(dij)
+    #[allow(unused)] // TODO(dij): This is for Zombies / ASM usage
     #[inline]
     pub(super) fn spawn_ex(&self, suspended: bool) -> io::Result<Child> {
         self.spawn_init(suspended, &self.stdin, &self.stdout, &self.stderr)
@@ -612,7 +604,7 @@ impl Command {
         {
             return Err(ErrorKind::NotFound.into());
         }
-        let path = env::split_paths(
+        let path = split_paths(
             self.resolve_var(&PATHEXT[0..4], env)
                 .unwrap_or_else(|| winapi::system_root().into())
                 .as_str(),
@@ -630,7 +622,7 @@ impl Command {
     }
     fn find_ext(p: String, e: &[&str]) -> Option<String> {
         if let Some(x) = p.as_bytes().iter().rposition(|v| *v == b'.') {
-            if fs::exists(&p) {
+            if exists(&p) {
                 return Some(p);
             }
             if p.len() - x <= 4 {
@@ -640,7 +632,7 @@ impl Command {
         for i in e {
             let mut t = p.clone();
             t.push_str(i);
-            if fs::exists(&t) {
+            if exists(&t) {
                 return Some(t);
             }
         }
@@ -719,8 +711,8 @@ impl Command {
             self.filter
                 .as_ref()
                 .map_or(Ok(None), |f| {
-                    if winapi::is_min_windows_vista() {
-                        f.handle_func(0x10C0, None).map(|h| Some(h))
+                    if !f.is_empty() && winapi::is_min_windows_vista() {
+                        f.handle_func(0x10C0, None).map(Some)
                     } else {
                         Ok(None)
                     }
@@ -728,7 +720,7 @@ impl Command {
                 .map_err(|v| io::Error::from(v))?,
         );
         // ^ Parent is None if value is None.
-        // This is in a Box to throw it on the Heap instead of the Stack.'
+        // This is in a Box to throw it on the Heap instead of the Stack.
         //
         // Resolve Stdio/Stdout/Stderr
         //  We don't need to add NULs when using StartupInfo (non-ex), as it will
@@ -764,11 +756,7 @@ impl Command {
         let t = WChar::from(self.title.as_ref().map(|v| v.as_str()));
         // Take the 'Desktop' value from our current PEB to set the process to our
         // Desktop session.
-        let d = WChar::from(unsafe {
-            (*(*winapi::GetCurrentProcessPEB()).process_parameters)
-                .desktop_info
-                .to_string()
-        });
+        let d = WChar::from(winapi::GetCurrentProcessPEB().process_params().desktop_info.to_string());
         // Build the standard StartupInfo struct.
         let mut i = StartupInfo::default();
         i.flags = self.start_flags;
@@ -836,9 +824,10 @@ impl Command {
         // Close Remote/Parent Handles as they are not needed.
         match *parent {
             Some(ref p) => {
-                winapi::DuplicateHandleEx(stdin.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map_or((), |h| winapi::close_handle(h));
-                winapi::DuplicateHandleEx(stdout.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map_or((), |h| winapi::close_handle(h));
-                winapi::DuplicateHandleEx(stderr.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map_or((), |h| winapi::close_handle(h));
+                // IGNORE ERRORS
+                ignore_error!(winapi::DuplicateHandleEx(stdin.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map(winapi::close_handle));
+                ignore_error!(winapi::DuplicateHandleEx(stdout.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map(winapi::close_handle));
+                ignore_error!(winapi::DuplicateHandleEx(stderr.0, p, winapi::CURRENT_PROCESS, 0, false, 0x3).map(winapi::close_handle));
             },
             None => {
                 if !stdin.0.is_invalid() {
@@ -857,21 +846,21 @@ impl Command {
         // Cache reference to the Process Handle to wait on if we need to read.
         let v = o.process.as_handle();
         Ok(Child {
-            exit:   AtomicI32::new(0),
+            exit:   AtomicI32::new(0i32),
             info:   o,
             done:   AtomicBool::new(false),
             stdin:  stdin.1.take().map(|h| {
                 // Remove Inheritance
-                let _ = winapi::SetHandleInformation(&h, false, false); // IGNORE ERROR
+                ignore_error!(winapi::SetHandleInformation(&h, false, false));
                 ChildStdin(h.into())
             }),
             stdout: match stdout.1.take() {
                 Some(h) => {
                     // Remove Inheritance
-                    let _ = winapi::SetHandleInformation(&h, false, false); // IGNORE ERROR
+                    ignore_error!(winapi::SetHandleInformation(&h, false, false));
                     let mut r = ChildStdout {
                         file:    h,
-                        event:   winapi::CreateEvent(None, false, false, false, None).map_err(io::Error::from)?,
+                        event:   winapi::CreateEvent(None, false, false, false, None)?,
                         parent:  v,
                         overlap: Box::new(Overlapped::default()),
                     };
@@ -883,10 +872,10 @@ impl Command {
             stderr: match stderr.1.take() {
                 Some(h) => {
                     // Remove Inheritance
-                    let _ = winapi::SetHandleInformation(&h, false, false); // IGNORE ERROR
+                    ignore_error!(winapi::SetHandleInformation(&h, false, false));
                     let mut r = ChildStderr(ChildStdout {
                         file:    h,
-                        event:   winapi::CreateEvent(None, false, false, false, None).map_err(io::Error::from)?,
+                        event:   winapi::CreateEvent(None, false, false, false, None)?,
                         parent:  v,
                         overlap: Box::new(Overlapped::default()),
                     });
@@ -916,8 +905,10 @@ impl Command {
             winapi::OpenThreadToken(winapi::CURRENT_THREAD, 0xF01FF, true)
                 .ok()
                 .map_or(None, |h| {
-                    // IGNORE ERROR
-                    let _ = winapi::SetThreadToken(winapi::CURRENT_THREAD, winapi::INVALID);
+                    ignore_error!(winapi::SetThreadToken(
+                        winapi::CURRENT_THREAD,
+                        Handle::INVALID
+                    ));
                     Some(h) // Only save the Handle if we remove it.
                 })
         } else {
@@ -953,16 +944,15 @@ impl Command {
             _ => winapi::CreateProcess(name, cmd, None, None, true, f, self.split, &env, dir, start),
         };
         // Set back our token if we took it off to impersonate.
-        // IGNORE ERROR
-        let _ = prev.map_or((), |h| {
+        ignore_error!(prev.map_or((), |h| {
             winapi::SetThreadToken(winapi::CURRENT_THREAD, h).unwrap_or_default()
-        });
+        }));
         r.map_err(io::Error::from)
     }
 }
 impl ExitCode {
-    pub const SUCCESS: ExitCode = ExitCode(0);
-    pub const FAILURE: ExitCode = ExitCode(1);
+    pub const SUCCESS: ExitCode = ExitCode(0i32);
+    pub const FAILURE: ExitCode = ExitCode(1i32);
 
     #[inline]
     pub fn exit_process(self) -> ! {
@@ -990,7 +980,7 @@ impl ExitStatus {
 impl AsyncPipe<'_> {
     #[inline]
     fn new(h: ChildStdout, buf: &mut Vec<u8>) -> AsyncPipe<'_> {
-        AsyncPipe { h, pos: 0, buf }
+        AsyncPipe { h, pos: 0usize, buf }
     }
 
     #[inline]
@@ -998,7 +988,7 @@ impl AsyncPipe<'_> {
         self.buf.truncate(self.pos);
     }
     fn check(&mut self) -> io::Result<bool> {
-        let (r, z) = self.result(true)?.map_or_else(|| (0, true), |n| (n, n > 0));
+        let (r, z) = self.result(true)?.map_or_else(|| (0usize, true), |n| (n, n > 0));
         if !z {
             return Ok(false);
         }
@@ -1018,14 +1008,14 @@ impl AsyncPipe<'_> {
                 }
                 self.pos += n;
             }
-            hint::spin_loop();
+            spin_loop();
         }
         Ok(())
     }
     #[inline]
     fn lookahead(&mut self) -> io::Result<()> {
         loop {
-            let (r, z) = self.read()?.map_or((0, false), |n| (n, n > 0));
+            let (r, z) = self.read()?.map_or((0usize, false), |n| (n, n > 0));
             self.pos += r;
             if !z {
                 break;
@@ -1241,8 +1231,7 @@ impl Drop for AsyncPipe<'_> {
     #[inline]
     fn drop(&mut self) {
         // Cancel any pending IO.
-        // IGNORE ERROR
-        let _ = winapi::CancelIoEx(&self.h.file, &mut self.h.overlap);
+        ignore_error!(winapi::CancelIoEx(&self.h.file, &mut self.h.overlap));
     }
 }
 
@@ -1388,7 +1377,13 @@ impl Read for ChildStdout {
                 if e != Win32Error::IoPending {
                     Err(e)
                 } else {
-                    let _ = winapi::wait_for_multiple_objects(&[self.event.0, self.parent.0], 2, false, -1, false);
+                    ignore_error!(winapi::wait_for_multiple_objects(
+                        &[self.event.0, self.parent.0],
+                        2,
+                        false,
+                        -1,
+                        false
+                    ));
                     Ok(self.overlap.internal_high)
                 }
             })
@@ -1429,19 +1424,52 @@ impl DerefMut for ChildStderr {
     }
 }
 
+impl Eq for PipeType {}
+impl Copy for PipeType {}
+impl Clone for PipeType {
+    #[inline]
+    fn clone(&self) -> PipeType {
+        *self
+    }
+}
+impl PartialEq for PipeType {
+    #[inline]
+    fn eq(&self, other: &PipeType) -> bool {
+        match (self, other) {
+            (PipeType::Stdin, PipeType::Stdin) => true,
+            (PipeType::Stdout, PipeType::Stdout) => true,
+            (PipeType::Stderr, PipeType::Stderr) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for StdioType {}
+impl Copy for StdioType {}
+impl Clone for StdioType {
+    #[inline]
+    fn clone(&self) -> StdioType {
+        *self
+    }
+}
+impl PartialEq for StdioType {
+    #[inline]
+    fn eq(&self, other: &StdioType) -> bool {
+        match (self, other) {
+            (StdioType::Null, StdioType::Null) => true,
+            (StdioType::Inherit, StdioType::Inherit) => true,
+            (StdioType::Pipe, StdioType::Pipe) => true,
+            (StdioType::Handle, StdioType::Handle) => true,
+            _ => false,
+        }
+    }
+}
+
 impl Copy for ExitCode {}
 impl Clone for ExitCode {
     #[inline]
     fn clone(&self) -> ExitCode {
         ExitCode(self.0)
-    }
-}
-impl Deref for ExitCode {
-    type Target = i32;
-
-    #[inline]
-    fn deref(&self) -> &i32 {
-        &self.0
     }
 }
 impl From<u8> for ExitCode {
@@ -1469,14 +1497,6 @@ impl Clone for ExitStatus {
     #[inline]
     fn clone(&self) -> ExitStatus {
         ExitStatus(self.0)
-    }
-}
-impl Deref for ExitStatus {
-    type Target = i32;
-
-    #[inline]
-    fn deref(&self) -> &i32 {
-        &self.0
     }
 }
 impl PartialEq for ExitStatus {
@@ -1548,7 +1568,7 @@ impl<'a> Iterator for CommandArgs<'a> {
         self.iter.size_hint()
     }
 }
-impl<'a> ExactSizeIterator for CommandArgs<'a> {
+impl<'a> ExactSizeIterator for CommandArgs<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.iter.len()
@@ -1569,7 +1589,7 @@ impl<'a> Iterator for CommandEnvs<'a> {
             .map(|(key, value)| (OsStr::new(key), Some(OsStr::new(value))))
     }
 }
-impl<'a> ExactSizeIterator for CommandEnvs<'a> {
+impl<'a> ExactSizeIterator for CommandEnvs<'_> {
     #[inline]
     fn len(&self) -> usize {
         self.iter.len()
@@ -1592,16 +1612,7 @@ pub fn parent_id() -> u32 {
 pub fn exit(exit_code: i32) -> ! {
     winapi::exit_process(exit_code as u32)
 }
-#[inline]
-pub fn processes() -> io::Result<Vec<ProcessEntry>> {
-    winapi::list_processes().map_err(io::Error::from)
-}
-#[inline]
-pub fn threads(pid: u32) -> io::Result<Vec<ThreadEntry>> {
-    winapi::list_threads(pid).map_err(io::Error::from)
-}
 
-#[inline]
 fn version_support() -> (bool, bool) {
     match VERSION.compare_exchange(0, 0x80, Ordering::AcqRel, Ordering::Relaxed) {
         Ok(_) => {
@@ -1621,18 +1632,18 @@ fn version_support() -> (bool, bool) {
     }
 }
 
-#[cfg(feature = "implant")]
+#[cfg(feature = "strip")]
 mod display {
     use core::fmt::{self, Debug, Formatter};
 
-    use super::ExitStatus;
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
+    use crate::process::ExitStatus;
     use crate::util::ToStr;
 
     impl Debug for ExitStatus {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            let mut b = [0; 21];
+            let mut b = [0u8; 21];
             f.write_str(self.0.into_str(&mut b))
         }
     }
@@ -1643,23 +1654,24 @@ mod display {
         }
     }
 }
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter};
 
-    use super::ExitStatus;
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
+    use crate::process::ExitStatus;
+    use crate::util::ToStr;
 
     impl Debug for ExitStatus {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            Display::fmt(self, f)
+            self.0.into_formatter(f)
         }
     }
     impl Display for ExitStatus {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            write!(f, "exit {}", self.0)
+            self.0.into_formatter(f)
         }
     }
 }

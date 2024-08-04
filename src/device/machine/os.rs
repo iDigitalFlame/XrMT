@@ -16,25 +16,20 @@
 
 #![no_implicit_prelude]
 
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
-pub const CURRENT: OS = if cfg!(target_os = "ios") {
-    OS::Ios
-} else if cfg!(target_os = "macos") {
-    OS::Mac
-} else if cfg!(target_os = "linux") {
-    OS::Linux
-} else if cfg!(target_os = "android") {
-    OS::Android
-} else if cfg!(target_family = "unix") {
-    OS::Unix
-} else if cfg!(target_family = "windows") {
-    OS::Windows
-} else {
-    OS::Unsupported
-};
+core::cfg_match! {
+    cfg(all(not(target_os = "macos"), target_vendor = "apple")) => { const fn _os() -> OS { OS::Ios } }
+    cfg(target_vendor = "apple") => { const fn _os() -> OS { OS::Mac }}
+    cfg(target_os = "android") => { const fn _os() -> OS { OS::Android }}
+    cfg(any(target_os = "linux", target_os = "fuchsia", target_os = "illumos", target_os = "solaris")) => { const fn _os() -> OS { OS::Linux }}
+    cfg(target_family = "unix") => { const fn _os() -> OS { OS::Unix }}
+    cfg(target_family = "windows")  => { const fn _os() -> OS { OS::Windows }}
+    _ => { const fn _os() -> OS { OS::Unsupported }}
+}
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+pub const CURRENT: OS = _os();
+
 #[repr(u8)]
 pub enum OS {
     Windows     = 0x0,
@@ -47,6 +42,14 @@ pub enum OS {
     Unsupported = 0x7,
 }
 
+impl Eq for OS {}
+impl Copy for OS {}
+impl Clone for OS {
+    #[inline]
+    fn clone(&self) -> OS {
+        *self
+    }
+}
 impl From<u8> for OS {
     #[inline]
     fn from(v: u8) -> OS {
@@ -62,13 +65,19 @@ impl From<u8> for OS {
         }
     }
 }
+impl PartialEq for OS {
+    #[inline]
+    fn eq(&self, other: &OS) -> bool {
+        *self as u8 == *other as u8
+    }
+}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter};
 
-    use super::OS;
-    use crate::util::stx::prelude::*;
+    use crate::device::machine::os::OS;
+    use crate::prelude::*;
 
     impl Debug for OS {
         #[inline]

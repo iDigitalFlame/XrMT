@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::cell::UnsafeCell;
 use core::error::Error;
@@ -23,9 +23,8 @@ use core::fmt::{self, Debug, Display, Formatter, Write};
 use core::ops::{Deref, DerefMut};
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
+use crate::prelude::*;
 use crate::sync::Mutant;
-use crate::util::stx;
-use crate::util::stx::prelude::*;
 
 pub enum TryLockError<T> {
     Poisoned(PoisonError<T>),
@@ -74,19 +73,19 @@ impl<T> PoisonError<T> {
         &mut self.value
     }
 }
+impl<T: Sized> Mutex<T> {
+    #[inline]
+    pub fn into_inner(self) -> LockResult<T> {
+        Ok(self.data.into_inner())
+    }
+}
 impl<T: ?Sized> Mutex<T> {
     #[inline]
     pub fn unlock(guard: MutexGuard<'_, T>) {
         drop(guard);
     }
 
-    #[inline]
-    pub fn into_inner(self) -> LockResult<T>
-    where T: Sized {
-        Ok(self.data.into_inner())
-    }
-
-    #[inline]
+    #[inline(always)]
     pub fn clear_poison(&self) {}
     #[inline]
     pub fn is_poisoned(&self) -> bool {
@@ -168,7 +167,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         // NOTE(dij): We panic here as this shouldn't happen.
-        stx::unwrap(self.inner.inner.unlock())
+        unwrap_unlikely(self.inner.inner.unlock())
     }
 }
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
@@ -218,15 +217,15 @@ impl<T> Display for TryLockError<T> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            TryLockError::Poisoned(_) => f.write_char('0'),
             TryLockError::WouldBlock => f.write_char('1'),
+            TryLockError::Poisoned(_) => f.write_char('0'),
         }
     }
 }
 impl<T> From<PoisonError<T>> for TryLockError<T> {
     #[inline]
-    fn from(err: PoisonError<T>) -> TryLockError<T> {
-        TryLockError::Poisoned(err)
+    fn from(v: PoisonError<T>) -> TryLockError<T> {
+        TryLockError::Poisoned(v)
     }
 }
 

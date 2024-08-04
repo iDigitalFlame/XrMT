@@ -15,17 +15,15 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use core::mem::MaybeUninit;
-use core::{mem, ptr};
+use core::marker::PhantomData;
+use core::mem::{size_of, zeroed, MaybeUninit};
+use core::{cmp, matches, ptr};
 
 use crate::data::blob::Blob;
-use crate::device::winapi::{self, Handle, OwnedHandle, StringBlock, TokenUser, UnicodeString, WCharPtr, Win32Error, Win32Result};
-use crate::util::stx::prelude::*;
-
-#[cfg_attr(rustfmt, rustfmt_skip)]
-pub use self::inner::*;
+use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle, ReadInto, StringBlock, UnicodeString, WCharPtr, Win32Result, WriteFrom};
+use crate::prelude::*;
 
 pub enum StartInfo<'a> {
     None,
@@ -34,11 +32,32 @@ pub enum StartInfo<'a> {
 }
 
 #[repr(C)]
+pub struct RemotePEB {
+    pub inheritied_address_space: u8,
+    pub read_image_file_exec:     u8,
+    pub being_debugged:           u8,
+    pub bitflags:                 u8,
+    pub mutant:                   usize,
+    pub image_base_address:       usize,
+    pub ldr:                      usize,
+    pub process_parameters:       usize,
+}
+
+#[repr(C)]
 pub struct PEB {
     pub inheritied_address_space: u8,
     pub read_image_file_exec:     u8,
     pub being_debugged:           u8,
     pub bitflags:                 u8,
+    // bitflags has the following
+    //  0 - ImageUsesLargePages
+    //  1 - IsProtectedProcess
+    //  2 - IsImageDynamicallyRelocated
+    //  3 - SkipPatchingUser32Forwarders
+    //  4 - IsPackagedProcess
+    //  5 - IsAppContainer
+    //  6 - IsProtectedProcessLight
+    //  7 - IsLongPathAwareProcess
     pub mutant:                   usize,
     pub image_base_address:       Handle,
     pub ldr:                      *mut LoadList,
@@ -110,12 +129,6 @@ pub struct ClientID {
     pub process: usize,
     pub thread:  usize,
 }
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
-pub struct ThreadEntry {
-    pub thread_id:  u32,
-    pub process_id: u32,
-    sus:            u8,
-}
 #[repr(C)]
 pub struct StartupInfo {
     pub size:           u32,
@@ -155,15 +168,9 @@ pub struct LoaderEntry {
     pub image_size:  usize,
     pub full_name:   UnicodeString,
     pub base_name:   UnicodeString,
-    pub flags:       usize,
-}
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
-pub struct ProcessEntry {
-    pub name:         String,
-    pub process_id:   u32,
-    pub parent_id:    u32,
-    pub thread_count: u32,
-    session:          i32,
+    pub flags:       u32,
+    pub load_count:  i16,
+    pub tls_index:   u16,
 }
 #[repr(C)]
 pub struct ProcessParams {
@@ -205,6 +212,10 @@ pub struct StartupInfoEx {
     pub info:  StartupInfo,
     pub attrs: *const ProcessThreadAttrList,
 }
+pub struct LoaderIter<'a> {
+    cur: *mut LoaderEntry,
+    _p:  PhantomData<&'a LoaderEntry>,
+}
 #[repr(C)]
 pub struct ThreadBasicInfo {
     pub exit_status: u32,
@@ -234,6 +245,42 @@ pub struct ProcessThreadAttr {
     value: *const usize,
 }
 #[repr(C)]
+pub struct RemoteProcessParams {
+    pub max_length:        u32,
+    pub length:            u32,
+    pub flags:             u32,
+    pub debug_flags:       u32,
+    pub console:           usize,
+    pub console_flags:     u32,
+    pub standard_input:    usize,
+    pub standard_output:   usize,
+    pub standard_error:    usize,
+    pub current_directory: RemoteCurrentDirectory,
+    pub dll_path:          RemoteUnicodeString,
+    pub image_name:        RemoteUnicodeString,
+    pub command_line:      RemoteUnicodeString,
+    pub environment:       usize,
+    pub start_x:           u32,
+    pub start_y:           u32,
+    pub count_x:           u32,
+    pub count_y:           u32,
+    pub count_chars_x:     u32,
+    pub count_chars_y:     u32,
+    pub fill_attribute:    u32,
+    pub window_flags:      u32,
+    pub show_window_flags: u32,
+    pub window_title:      RemoteUnicodeString,
+    pub desktop_info:      RemoteUnicodeString,
+    pub shell_info:        RemoteUnicodeString,
+    pub runtime_data:      RemoteUnicodeString,
+}
+#[repr(C)]
+pub struct RemoteUnicodeString {
+    pub length:     u16,
+    pub max_length: u16,
+    pub buffer:     usize,
+}
+#[repr(C)]
 pub struct ProcessThreadAttrList {
     mask:  u32,
     size:  u32,
@@ -242,98 +289,35 @@ pub struct ProcessThreadAttrList {
     unk:   usize,
     attrs: [MaybeUninit<ProcessThreadAttr>; 5],
 }
+#[repr(C)]
+pub struct RemoteCurrentDirectory {
+    pub dos_path: RemoteUnicodeString,
+    pub handle:   usize,
+}
 
-impl ThreadEntry {
+impl PEB {
     #[inline]
-    pub fn is_suspended(&self) -> Win32Result<bool> {
-        if self.sus > 0 {
-            return Ok(self.sus == 2);
-        }
-        if winapi::GetCurrentThreadID() == self.thread_id {
-            return Err(Win32Error::InvalidOperation);
-        }
-        // 0x42 - THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME
-        let h = winapi::OpenThread(0x42, false, self.thread_id)?;
-        winapi::SuspendThread(&h)?;
-        Ok(winapi::ResumeThread(h)? > 1)
+    pub fn load_list<'a>(&self) -> &'a LoadList {
+        unsafe { &*(self.ldr) }
     }
     #[inline]
-    pub fn handle(&self, access: u32) -> Win32Result<OwnedHandle> {
-        winapi::OpenThread(access, false, self.thread_id)
+    pub fn process_params<'a>(&self) -> &'a ProcessParams {
+        unsafe { &*(self.process_parameters) }
     }
 }
-impl ProcessEntry {
-    pub fn user(&self) -> Win32Result<String> {
-        // 0x400 - PROCESS_QUERY_INFORMATION
-        let h = winapi::OpenProcess(0x400, false, self.process_id)?;
-        // 0x8 - TOKEN_QUERY
-        let t = winapi::OpenProcessToken(h, 0x8)?;
-        let mut buf = Blob::new();
-        TokenUser::from_token(t, &mut buf)?.user.sid.user()
-    }
+impl LoadList {
     #[inline]
-    pub fn handle(&self, access: u32) -> Win32Result<OwnedHandle> {
-        winapi::OpenProcess(access, false, self.process_id)
-    }
-    #[inline]
-    pub fn info(&self, access: u32, elevated: bool, session: bool) -> Win32Result<(bool, u32)> {
-        self.info_ex(access, elevated, session, false).map(|r| (r.1, r.2))
-    }
-    pub fn info_ex(&self, access: u32, elevated: bool, session: bool, handle: bool) -> Win32Result<(Option<OwnedHandle>, bool, u32)> {
-        if !handle && !elevated && !session {
-            return Ok((None, false, 0));
-        }
-        if !handle && !elevated && session && self.session >= 0 {
-            return Ok((None, false, self.session as u32));
-        }
-        // 0x400 - PROCESS_QUERY_INFORMATION
-        //
-        // NOTE(dij): The reason we have an access param is so we can only open
-        //            the handle once while we're doing this to "check" if we can
-        //            access it with the requested access we want.
-        //            When Filters call this function, we do a quick 'Handle' check
-        //            to make sure we can open it before adding to the eval list.
-        let h = winapi::OpenProcess(access | 0x400, false, self.process_id)?;
-        if !elevated && !session {
-            if !handle {
-                return Ok((None, false, 0));
-            }
-            return Ok((Some(h), false, 0));
-        }
-        // 0x2000A - TOKEN_READ | TOKEN_QUERY
-        let t = winapi::OpenProcessToken(&h, 0x2000A)?;
-        let v = if self.session >= 0 {
-            self.session as u32
-        } else {
-            let mut s: u32 = 0;
-            // 0xC - TokenSessionInformation
-            winapi::GetTokenInformation(&t, 0xC, &mut s, 4)?;
-            s
-        };
-        let e = if winapi::is_token_elevated(&h) {
-            let mut buf = Blob::new();
-            // 0x17 - WinLocalServiceSid
-            // 0x18 - WinNetworkServiceSid
-            TokenUser::from_token(t, &mut buf).map_or(false, |u| {
-                u.user.sid.is_well_known(0x17) || u.user.sid.is_well_known(0x18)
-            })
-        } else {
-            false
-        };
-        if !handle {
-            Ok((None, e, v))
-        } else {
-            Ok((Some(h), e, v))
+    pub fn iter<'a>(&self) -> LoaderIter<'a> {
+        LoaderIter {
+            cur: self.module_list.f_link,
+            _p:  PhantomData,
         }
     }
 }
 impl StartInfo<'_> {
     #[inline]
     pub fn is_extended(&self) -> bool {
-        match self {
-            StartInfo::Extended(_) => true,
-            _ => false,
-        }
+        matches!(self, StartInfo::Extended(_))
     }
     #[inline]
     pub fn as_ptr(&self) -> *const usize {
@@ -382,38 +366,29 @@ impl ProcessThreadAttrList {
     }
 }
 
-impl Copy for ThreadEntry {}
-impl Clone for ThreadEntry {
+impl Default for RemotePEB {
     #[inline]
-    fn clone(&self) -> ThreadEntry {
-        ThreadEntry {
-            sus:        self.sus,
-            thread_id:  self.thread_id,
-            process_id: self.process_id,
+    fn default() -> RemotePEB {
+        RemotePEB {
+            ldr:                      0usize,
+            mutant:                   0usize,
+            bitflags:                 0u8,
+            being_debugged:           0u8,
+            image_base_address:       0usize,
+            process_parameters:       0usize,
+            read_image_file_exec:     0u8,
+            inheritied_address_space: 0u8,
         }
     }
 }
-impl Clone for ProcessEntry {
-    #[inline]
-    fn clone(&self) -> ProcessEntry {
-        ProcessEntry {
-            name:         self.name.clone(),
-            session:      self.session,
-            parent_id:    self.parent_id,
-            process_id:   self.process_id,
-            thread_count: self.thread_count,
-        }
-    }
-}
-
 impl Default for ProcessInfo {
     #[inline]
     fn default() -> ProcessInfo {
         ProcessInfo {
             thread:     OwnedHandle::empty(),
             process:    OwnedHandle::empty(),
-            thread_id:  0,
-            process_id: 0,
+            thread_id:  0u32,
+            process_id: 0u32,
         }
     }
 }
@@ -421,24 +396,24 @@ impl Default for StartupInfo {
     #[inline]
     fn default() -> StartupInfo {
         StartupInfo {
-            size:           mem::size_of::<StartupInfo>() as u32,
+            size:           size_of::<StartupInfo>() as u32,
             pad1:           ptr::null(),
-            pad2:           0,
+            pad2:           0u16,
             pad3:           ptr::null(),
-            pos_x:          0,
-            pos_y:          0,
-            flags:          0,
+            pos_x:          0u32,
+            pos_y:          0u32,
+            flags:          0u32,
             title:          WCharPtr::null(),
-            stdin:          0,
-            stdout:         0,
-            stderr:         0,
-            size_x:         0,
-            size_y:         0,
+            stdin:          0usize,
+            stdout:         0usize,
+            stderr:         0usize,
+            size_x:         0u32,
+            size_y:         0u32,
             desktop:        WCharPtr::null(),
-            show_window:    0,
-            count_chars_x:  0,
-            count_chars_y:  0,
-            fill_attribute: 0,
+            show_window:    0u16,
+            count_chars_x:  0u32,
+            count_chars_y:  0u32,
+            fill_attribute: 0u32,
         }
     }
 }
@@ -446,11 +421,11 @@ impl Default for ThreadBasicInfo {
     #[inline]
     fn default() -> ThreadBasicInfo {
         ThreadBasicInfo {
-            pad1:        0,
-            pad2:        0,
-            teb_base:    0,
-            client_id:   ClientID { process: 0, thread: 0 },
-            exit_status: 0,
+            pad1:        0u64,
+            pad2:        0u32,
+            teb_base:    0usize,
+            client_id:   ClientID { process: 0usize, thread: 0usize },
+            exit_status: 0u32,
         }
     }
 }
@@ -458,12 +433,12 @@ impl Default for ProcessBasicInfo {
     #[inline]
     fn default() -> ProcessBasicInfo {
         ProcessBasicInfo {
-            pad1:              0,
-            pad2:              0,
+            pad1:              0usize,
+            pad2:              0u32,
             peb_base:          ptr::null_mut(),
-            process_id:        0,
-            exit_status:       0,
-            parent_process_id: 0,
+            process_id:        0usize,
+            exit_status:       0u32,
+            parent_process_id: 0usize,
         }
     }
 }
@@ -480,11 +455,11 @@ impl Default for ProcessThreadAttrList {
     #[inline]
     fn default() -> ProcessThreadAttrList {
         ProcessThreadAttrList {
-            pad:   0,
-            unk:   0,
-            mask:  0,
-            size:  0,
-            count: 0,
+            pad:   0u32,
+            unk:   0usize,
+            mask:  0u32,
+            size:  0u32,
+            count: 0u32,
             attrs: [
                 MaybeUninit::uninit(),
                 MaybeUninit::uninit(),
@@ -496,303 +471,107 @@ impl Default for ProcessThreadAttrList {
     }
 }
 
-#[cfg(feature = "snap")]
-mod inner {
-    use core::mem;
+impl<'a> Iterator for LoaderIter<'a> {
+    type Item = &'a mut LoaderEntry;
 
-    use crate::device::winapi::{self, ProcessEntry, ThreadEntry, Win32Result};
-    use crate::util::stx::prelude::*;
-
-    #[repr(C)]
-    pub struct ThreadEntry32 {
-        pub size:       u32,
-        pub usage:      u32,
-        pub thread_id:  u32,
-        pub process_id: u32,
-        pad1:           [i32; 2],
-        pub flags:      u32,
-    }
-    #[repr(C)]
-    pub struct ProcessEntry32 {
-        pub size:       u32,
-        pub usage:      u32,
-        pub process_id: u32,
-        pub heap_id:    usize,
-        pub module_id:  u32,
-        pub threads:    u32,
-        pub parent_id:  u32,
-        pub class_base: i32,
-        pub flags:      u32,
-        pub exe_file:   [u16; 260],
-    }
-
-    impl Default for ThreadEntry32 {
-        #[inline]
-        fn default() -> ThreadEntry32 {
-            ThreadEntry32 {
-                pad1:       [0; 2],
-                size:       0x1C,
-                flags:      0,
-                usage:      0,
-                thread_id:  0,
-                process_id: 0,
-            }
+    #[inline]
+    fn next(&mut self) -> Option<&'a mut LoaderEntry> {
+        if self.cur.is_null() || unsafe { &(*self.cur) }.dll_base.is_invalid() {
+            return None;
         }
-    }
-    impl Default for ProcessEntry32 {
-        #[inline]
-        fn default() -> ProcessEntry32 {
-            ProcessEntry32 {
-                size:       mem::size_of::<ProcessEntry32>() as u32,
-                flags:      0,
-                usage:      0,
-                threads:    0,
-                heap_id:    0,
-                module_id:  0,
-                parent_id:  0,
-                class_base: 0,
-                process_id: 0,
-                exe_file:   [0; 260],
-            }
-        }
-    }
-
-    impl From<&ThreadEntry32> for ThreadEntry {
-        #[inline]
-        fn from(v: &ThreadEntry32) -> ThreadEntry {
-            ThreadEntry {
-                sus:        0,
-                thread_id:  v.thread_id,
-                process_id: v.process_id,
-            }
-        }
-    }
-    impl From<&ProcessEntry32> for ProcessEntry {
-        #[inline]
-        fn from(v: &ProcessEntry32) -> ProcessEntry {
-            ProcessEntry {
-                name:         winapi::utf16_to_str_trim(&v.exe_file),
-                session:      -1,
-                parent_id:    v.parent_id,
-                process_id:   v.process_id,
-                thread_count: v.threads,
-            }
-        }
-    }
-
-    pub fn list_processes() -> Win32Result<Vec<ProcessEntry>> {
-        // 0x2 - TH32CS_SNAPPROCESS
-        let h = winapi::CreateToolhelp32Snapshot(0x2, 0)?;
-        let mut r = Vec::new();
-        let mut e = ProcessEntry32::default();
-        if let Err(x) = winapi::Process32First(&h, &mut e) {
-            // 0x12 - ERR_NO_MORE_FILES
-            return if x.code() == 0x12 { Ok(r) } else { Err(x) };
-        }
-        loop {
-            r.push((&e).into());
-            if let Err(x) = winapi::Process32Next(&h, &mut e) {
-                // 0x12 - ERR_NO_MORE_FILES
-                return if x.code() == 0x12 { Ok(r) } else { Err(x) };
-            }
-        }
-    }
-    pub fn list_threads(pid: u32) -> Win32Result<Vec<ThreadEntry>> {
-        // 0x4 - TH32CS_SNAPTHREAD
-        let h = winapi::CreateToolhelp32Snapshot(0x4, 0)?;
-        let mut r = Vec::new();
-        let mut e = ThreadEntry32::default();
-        if let Err(x) = winapi::Thread32First(&h, &mut e) {
-            // 0x12 - ERR_NO_MORE_FILES
-            return if x.code() == 0x12 { Ok(r) } else { Err(x) };
-        }
-        loop {
-            if e.process_id == pid {
-                r.push((&e).into())
-            }
-            if let Err(x) = winapi::Thread32Next(&h, &mut e) {
-                // 0x12 - ERR_NO_MORE_FILES
-                return if x.code() == 0x12 { Ok(r) } else { Err(x) };
-            }
-        }
+        let r = unsafe { &mut *(self.cur) };
+        self.cur = unsafe { (*self.cur).f_link };
+        Some(r)
     }
 }
-#[cfg(not(feature = "snap"))]
-mod inner {
-    use core::{mem, ptr};
 
-    use crate::device::winapi::loader::ntdll;
-    use crate::device::winapi::{self, ClientID, ProcessEntry, ThreadEntry, UnicodeString, Win32Result};
-    use crate::util::stx::prelude::*;
-
-    #[repr(C)]
-    struct ThreadInfo {
-        pad1:          [u8; 28],
-        start_address: usize,
-        client_id:     ClientID,
-        pad2:          [u8; 12],
-        thread_state:  u32,
-        wait_reason:   u32,
-        pad3:          u32,
-    }
-    #[repr(C)]
-    struct ProcessInfo {
-        next_entry:        u32,
-        thread_count:      u32,
-        pad1:              [i64; 6],
-        image_name:        UnicodeString,
-        pad2:              i32,
-        process_id:        usize,
-        parent_process_id: usize,
-        pad3:              u32,
-        session_id:        u32,
-        pad4:              [u8; (winapi::PTR_SIZE * 13) + 48],
-    }
-    struct ThreadIter<'a> {
-        buf:   &'a Vec<u8>,
-        pos:   usize,
-        count: u32,
-        total: u32,
-    }
-    struct ProcessIter<'a> {
-        buf:  &'a Vec<u8>,
-        pos:  usize,
-        next: usize,
+impl RemotePEB {
+    #[inline]
+    pub fn read(h: impl AsHandle, ptr: *mut PEB) -> Win32Result<RemotePEB> {
+        let mut p = RemotePEB::default();
+        winapi::NtReadVirtualMemory(
+            h,
+            ptr.into(),
+            size_of::<RemotePEB>(),
+            ReadInto::Direct(&mut p),
+        )?;
+        Ok(p)
     }
 
-    impl ProcessInfo {
-        #[inline]
-        fn iter<'a>(buf: &'a Vec<u8>) -> ProcessIter<'a> {
-            ProcessIter { buf, pos: 0, next: 0 }
+    #[inline]
+    pub fn command_line(&self, h: impl AsHandle) -> Win32Result<String> {
+        Ok(self.process_params(&h)?.command_line.to_string(h))
+    }
+    #[inline]
+    pub fn process_params(&self, h: impl AsHandle) -> Win32Result<RemoteProcessParams> {
+        let mut p = unsafe { zeroed() };
+        winapi::NtReadVirtualMemory(
+            h,
+            self.process_parameters.into(),
+            size_of::<RemoteProcessParams>(),
+            ReadInto::Direct(&mut p),
+        )?;
+        Ok(p)
+    }
+}
+impl RemoteUnicodeString {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.length as usize
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.length == 0 || self.max_length == 0 || self.buffer == 0
+    }
+    #[inline]
+    pub fn to_string(&self, h: impl AsHandle) -> String {
+        if self.length == 0 || self.max_length == 0 || self.buffer == 0 {
+            return String::new();
         }
+        let mut b: Blob<u16, 128> = Blob::with_size(self.length as usize / 2);
+        let r = winapi::NtReadVirtualMemory(
+            h,
+            self.buffer.into(),
+            self.length as usize,
+            ReadInto::Pointer(b.as_mut_ptr()),
+        )
+        .unwrap_or(0); // If this fails, we just return an empty String.
+        if r == 0 {
+            return String::new();
+        }
+        match b.iter().rposition(|v| *v == b' ' as u16) {
+            Some(i) => winapi::utf16_to_str(&b[..i]),
+            None => winapi::utf16_to_str(&b),
+        }
+    }
+    pub fn write(&self, h: impl AsHandle, v: impl AsRef<str>) -> Win32Result<usize> {
+        if self.length == 0 || self.max_length == 0 {
+            return Ok(0);
+        }
+        let s = v.as_ref().encode_utf16().collect::<Blob<u16, 128>>();
+        let t = cmp::min(s.len_as_bytes(), self.length as usize) as u16;
+        // x32 - 4
+        // x64 - 8 PTR_SIZE??
+        winapi::NtWriteVirtualMemory(
+            &h,
+            (self.buffer - winapi::PTR_SIZE).into(),
+            2,
+            WriteFrom::Direct(&t),
+        )?;
+        winapi::NtWriteVirtualMemory(
+            &h,
+            self.buffer.into(),
+            s.len_as_bytes(),
+            WriteFrom::Pointer(s.as_ptr()),
+        )
+    }
+}
 
-        #[inline]
-        fn threads<'b>(&self, pos: usize, buf: &'b Vec<u8>) -> ThreadIter<'b> {
-            ThreadIter {
-                buf,
-                pos: pos + mem::size_of::<ProcessInfo>(),
-                count: 0,
-                total: self.thread_count,
-            }
-        }
-    }
-
-    impl<'a> Iterator for ThreadIter<'a> {
-        type Item = &'a ThreadInfo;
-
-        #[inline]
-        fn next(&mut self) -> Option<&'a ThreadInfo> {
-            if self.count == self.total {
-                return None;
-            }
-            let i = unsafe {
-                (self
-                    .buf
-                    .as_ptr()
-                    .add(self.pos + (mem::size_of::<ThreadInfo>() * self.count as usize)) as *const ThreadInfo)
-                    .as_ref()?
-            };
-            self.count += 1;
-            Some(i)
-        }
-    }
-    impl<'a> Iterator for ProcessIter<'a> {
-        type Item = (&'a ProcessInfo, usize);
-
-        #[inline]
-        fn next(&mut self) -> Option<(&'a ProcessInfo, usize)> {
-            if self.next == 0 && self.pos > 0 {
-                return None;
-            }
-            self.pos += self.next;
-            let p = unsafe { (self.buf.as_ptr().add(self.pos) as *const ProcessInfo).as_ref()? };
-            self.next = p.next_entry as usize;
-            if p.process_id > 0 {
-                Some((p, self.pos))
-            } else {
-                self.next()
-            }
-        }
-    }
-    impl<'a> ExactSizeIterator for ThreadIter<'a> {
-        #[inline]
-        fn len(&self) -> usize {
-            self.total as usize
-        }
-    }
-
-    impl From<&ThreadInfo> for ThreadEntry {
-        #[inline]
-        fn from(v: &ThreadInfo) -> ThreadEntry {
-            ThreadEntry {
-                thread_id:  v.client_id.thread as u32,
-                process_id: v.client_id.process as u32,
-                sus:        if v.thread_state == 5 && v.wait_reason == 5 {
-                    2
-                } else {
-                    1
-                },
-            }
-        }
-    }
-    impl From<&ProcessInfo> for ProcessEntry {
-        #[inline]
-        fn from(v: &ProcessInfo) -> ProcessEntry {
-            ProcessEntry {
-                name:         v.image_name.to_string(),
-                session:      v.session_id as i32,
-                parent_id:    v.parent_process_id as u32,
-                process_id:   v.process_id as u32,
-                thread_count: v.thread_count,
-            }
-        }
-    }
-
-    pub fn list_processes() -> Win32Result<Vec<ProcessEntry>> {
-        winapi::init_ntdll();
-        let func = unsafe {
-            winapi::make_syscall!(
-                *ntdll::NtQuerySystemInformation,
-                extern "stdcall" fn(u32, *mut u8, u32, *mut u32) -> u32
-            )
-        };
-        let mut s = 0;
-        // 0x5 - SystemProcessInformation
-        let r = func(0x5, ptr::null_mut(), 0, &mut s);
-        if s == 0 {
-            return Err(winapi::nt_error(r));
-        }
-        let mut b = vec![0; s as usize * 2];
-        // 0x5 - SystemProcessInformation
-        let r = func(0x5, b.as_mut_ptr(), s * 2, &mut s);
-        if r > 0 {
-            return Err(winapi::nt_error(r));
-        }
-        Ok(ProcessInfo::iter(&b).map(|(v, _)| v.into()).collect::<Vec<ProcessEntry>>())
-    }
-    pub fn list_threads(pid: u32) -> Win32Result<Vec<ThreadEntry>> {
-        winapi::init_ntdll();
-        let func = unsafe {
-            winapi::make_syscall!(
-                *ntdll::NtQuerySystemInformation,
-                extern "stdcall" fn(u32, *mut u8, u32, *mut u32) -> u32
-            )
-        };
-        let mut s = 0;
-        // 0x5 - SystemProcessInformation
-        let r = func(0x5, ptr::null_mut(), 0, &mut s);
-        if s == 0 {
-            return Err(winapi::nt_error(r));
-        }
-        let mut b = vec![0; s as usize * 2];
-        // 0x5 - SystemProcessInformation
-        let r = func(0x5, b.as_mut_ptr(), s * 2, &mut s);
-        if r > 0 {
-            return Err(winapi::nt_error(r));
-        }
-        match ProcessInfo::iter(&b).find(|(v, _)| v.process_id as u32 == pid) {
-            Some((p, i)) => Ok(p.threads(i, &b).map(|v| v.into()).collect::<Vec<ThreadEntry>>()),
-            None => Err(winapi::Win32Error::FileNotFound),
-        }
-    }
+#[inline]
+pub fn read_remote_cmdline(h: impl AsHandle) -> Win32Result<String> {
+    let mut i = ProcessBasicInfo::default();
+    // 0x0 - ProcessBasicInformation
+    winapi::NtQueryInformationProcess(&h, 0, &mut i, size_of::<ProcessBasicInfo>() as u32)?;
+    let p = RemotePEB::read(&h, i.peb_base)?;
+    p.command_line(h)
 }

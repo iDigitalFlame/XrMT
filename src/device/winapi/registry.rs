@@ -15,29 +15,33 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::error::Error;
 use core::fmt::{self, Debug, Display, Formatter};
+use core::iter::once;
+use core::mem::forget;
 use core::ops::Deref;
-use core::{cmp, iter, mem, slice};
+use core::slice::from_raw_parts;
+use core::{cmp, matches};
 
 use crate::data::blob::Blob;
-use crate::device::winapi::{self, AsHandle, DecodeUtf16, Handle, MaybeString, RegKeyInfo, Win32Error, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::data::str::MaybeString;
+use crate::device::winapi::{self, AsHandle, DecodeUtf16, Handle, RegKeyInfo, Win32Error, Win32Result};
+use crate::prelude::*;
 
-pub const VALUE_STRING: u8 = 1;
-pub const VALUE_EXPAND_STRING: u8 = 2;
-pub const VALUE_BINARY: u8 = 3;
-pub const VALUE_DWORD: u8 = 4;
-pub const VALUE_STRING_LIST: u8 = 7;
-pub const VALUE_QWORD: u8 = 11;
+pub const VALUE_STRING: u8 = 1u8;
+pub const VALUE_EXPAND_STRING: u8 = 2u8;
+pub const VALUE_BINARY: u8 = 3u8;
+pub const VALUE_DWORD: u8 = 4u8;
+pub const VALUE_STRING_LIST: u8 = 7u8;
+pub const VALUE_QWORD: u8 = 11u8;
 
-pub const HKEY_CLASSES_ROOT: Key = Key(Handle(0x80000000));
-pub const HKEY_CURRENT_USER: Key = Key(Handle(0x80000001));
-pub const HKEY_LOCAL_MACHINE: Key = Key(Handle(0x80000002));
-pub const HKEY_USERS: Key = Key(Handle(0x80000003));
-pub const HKEY_CURRENT_CONFIG: Key = Key(Handle(0x80000005));
+pub const HKEY_USERS: Key = Key(Handle(0x80000003usize));
+pub const HKEY_CLASSES_ROOT: Key = Key(Handle(0x80000000usize));
+pub const HKEY_CURRENT_USER: Key = Key(Handle(0x80000001usize));
+pub const HKEY_LOCAL_MACHINE: Key = Key(Handle(0x80000002usize));
+pub const HKEY_CURRENT_CONFIG: Key = Key(Handle(0x80000005usize));
 
 pub enum TypeError {
     InvalidSize,
@@ -54,10 +58,14 @@ impl Key {
     #[inline]
     pub fn take(v: OwnedKey) -> Key {
         let h = v.0;
-        mem::forget(v); // Prevent double close
+        forget(v); // Prevent double close
         h
     }
 
+    #[inline]
+    pub fn handle(&self) -> Handle {
+        self.0
+    }
     #[inline]
     pub fn is_invalid(&self) -> bool {
         self.0.is_invalid()
@@ -97,13 +105,12 @@ impl Key {
     pub fn delete_tree(&self, subkey: impl MaybeString) -> Win32Result<()> {
         delete_tree(*self, subkey)
     }
-
     #[inline]
     pub fn open(&self, subkey: impl MaybeString, access: u32) -> Win32Result<OwnedKey> {
         open(*self, subkey, access)
     }
     pub fn value_number(&self, value: impl MaybeString) -> Result<(u64, u8), TypeError> {
-        let (b, t) = self.value_raw(value, 8).map_err(|e| TypeError::Err(e))?;
+        let (b, t) = self.value_raw(value, 8).map_err(TypeError::Err)?;
         match t {
             VALUE_DWORD => {
                 if b.len() != 4 {
@@ -137,37 +144,36 @@ impl Key {
         winapi::RegSetValueEx(*self, value, VALUE_QWORD as u32, Some(b), 8)
     }
     pub fn value_string(&self, value: impl MaybeString) -> Result<(String, u8), TypeError> {
-        let (b, t) = self.value_raw(value, 64).map_err(|e| TypeError::Err(e))?;
+        let (b, t) = self.value_raw(value, 64)?;
         match t {
             VALUE_STRING | VALUE_EXPAND_STRING => (),
             _ => return Err(TypeError::InvalidType(t)),
         }
-        if b.len() == 0 {
+        if b.is_empty() {
             return Ok((String::new(), t));
         }
         let v = unsafe { b.as_slice_of() };
-        // SAFETY: Always in bounds.
-        Ok((unsafe { v.get_unchecked(0..v.len() - 1) }.decode_utf16(), t))
+        // Cut of NULL
+        Ok(((&v[0..v.len() - 1]).decode_utf16(), t))
     }
     pub fn value_strings(&self, value: impl MaybeString) -> Result<Vec<String>, TypeError> {
-        let (b, t) = self.value_raw(value, 8).map_err(|e| TypeError::Err(e))?;
+        let (b, t) = self.value_raw(value, 8)?;
         if t != VALUE_STRING_LIST {
             return Err(TypeError::InvalidType(t));
         }
         let mut r = Vec::new();
-        if b.len() == 0 {
+        if b.is_empty() {
             return Ok(r);
         }
         let s = unsafe { b.as_slice_of() };
-        let mut last = 0;
+        let mut last = 0usize;
         // SAFETY: Always in bounds.
-        for (i, v) in unsafe { s.get_unchecked(0..s.len() - 1) }.iter().enumerate() {
+        for (i, v) in s[0..s.len() - 1].iter().enumerate() {
             if *v > 0 {
                 continue;
             }
             if i - last > 0 {
-                // SAFETY: Always in bounds.
-                r.push(unsafe { s.get_unchecked(last..i) }.decode_utf16());
+                r.push((&s[last..i]).decode_utf16())
             }
             last = i + 1;
         }
@@ -175,7 +181,7 @@ impl Key {
     }
     #[inline]
     pub fn value_binary(&self, value: impl MaybeString) -> Result<Blob<u8, 256>, TypeError> {
-        let (b, t) = self.value_raw(value, 64).map_err(|e| TypeError::Err(e))?;
+        let (b, t) = self.value_raw(value, 64)?;
         if t != VALUE_BINARY {
             Err(TypeError::InvalidType(t))
         } else {
@@ -192,20 +198,20 @@ impl Key {
     }
     #[inline]
     pub fn set_value_string(&self, value: impl MaybeString, data: impl AsRef<str>) -> Win32Result<()> {
-        let t = data.as_ref().encode_utf16().chain(iter::once(0)).collect::<Vec<u16>>();
-        let b = unsafe { slice::from_raw_parts(t.as_ptr() as *const u8, t.len() * 2) };
+        let t = data.as_ref().encode_utf16().chain(once(0)).collect::<Vec<u16>>();
+        let b = unsafe { from_raw_parts(t.as_ptr() as *const u8, t.len() * 2) };
         winapi::RegSetValueEx(
             *self,
             value,
             VALUE_STRING as u32,
             Some(b),
-            cmp::min(b.len(), u32::MAX as usize) as u32,
+            cmp::min(b.len(), 0xFFFFFFFF) as u32,
         )
     }
     pub fn set_value_strings(&self, value: impl MaybeString, data: Vec<impl AsRef<str>>) -> Win32Result<()> {
         let mut t: Blob<u16, 256> = Blob::with_capacity(64 * data.len());
         for i in data {
-            t.extend(i.as_ref().encode_utf16().chain(iter::once(0)))
+            t.extend(i.as_ref().encode_utf16().chain(once(0)))
         }
         t.push(0);
         let b = unsafe { t.as_slice_of() };
@@ -214,21 +220,17 @@ impl Key {
             value,
             VALUE_STRING_LIST as u32,
             Some(b),
-            cmp::min(b.len(), u32::MAX as usize) as u32,
+            cmp::min(b.len(), 0xFFFFFFFF) as u32,
         )
     }
     #[inline]
     pub fn set_value_binary(&self, value: impl MaybeString, data: Option<impl AsRef<[u8]>>) -> Win32Result<()> {
-        let n = data
-            .as_ref()
-            .map_or(0, |v| cmp::min(v.as_ref().len(), u32::MAX as usize) as u32);
+        let n = data.as_ref().map_or(0, |v| cmp::min(v.as_ref().len(), 0xFFFFFFFF) as u32);
         winapi::RegSetValueEx(*self, value, VALUE_BINARY as u32, data, n)
     }
     #[inline]
     pub fn set_value_raw(&self, value: impl MaybeString, value_type: u8, data: Option<impl AsRef<[u8]>>) -> Win32Result<()> {
-        let n = data
-            .as_ref()
-            .map_or(0, |v| cmp::min(v.as_ref().len(), u32::MAX as usize) as u32);
+        let n = data.as_ref().map_or(0, |v| cmp::min(v.as_ref().len(), 0xFFFFFFFF) as u32);
         winapi::RegSetValueEx(*self, value, value_type as u32, data, n)
     }
 
@@ -259,10 +261,7 @@ impl OwnedKey {
 impl TypeError {
     #[inline]
     pub fn is_err(&self) -> bool {
-        match self {
-            TypeError::InvalidType(_) => false,
-            _ => true,
-        }
+        !matches!(self, TypeError::InvalidType(_))
     }
     #[inline]
     pub fn real_type(&self) -> u8 {
@@ -282,6 +281,7 @@ impl Clone for Key {
     }
 }
 impl AsHandle for Key {
+    #[inline]
     fn as_handle(&self) -> Handle {
         self.0
     }
@@ -318,6 +318,7 @@ impl Deref for OwnedKey {
     }
 }
 impl AsHandle for OwnedKey {
+    #[inline]
     fn as_handle(&self) -> Handle {
         self.0 .0
     }
@@ -361,13 +362,40 @@ impl Display for TypeError {
         }
     }
 }
+impl From<Win32Error> for TypeError {
+    #[inline]
+    fn from(v: Win32Error) -> TypeError {
+        TypeError::Err(v)
+    }
+}
 
-#[cfg(not(feature = "implant"))]
+#[inline]
+pub fn delete_key(key: Key, subkey: impl AsRef<str>) -> Win32Result<()> {
+    winapi::RegDeleteKey(key, subkey, 0)
+}
+#[inline]
+pub fn delete_value(key: Key, value: impl MaybeString) -> Win32Result<()> {
+    winapi::RegDeleteKeyValue(key, value)
+}
+#[inline]
+pub fn delete_tree(key: Key, subkey: impl MaybeString) -> Win32Result<()> {
+    winapi::RegDeleteTree(key, subkey)
+}
+#[inline]
+pub fn open(key: Key, subkey: impl MaybeString, access: u32) -> Win32Result<OwnedKey> {
+    winapi::RegOpenKeyEx(key, subkey, 0, access).map(|v| v.into())
+}
+#[inline]
+pub fn create(key: Key, subkey: impl AsRef<str>, access: u32) -> Win32Result<(OwnedKey, bool)> {
+    winapi::RegCreateKeyEx(key, subkey, None, 0, access, None).map(|v| (v.0.into(), v.1))
+}
+
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::{Key, OwnedKey};
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::registry::{Key, OwnedKey};
+    use crate::prelude::*;
 
     impl Debug for Key {
         #[inline]
@@ -418,25 +446,4 @@ mod display {
             UpperHex::fmt(&self.0 .0 .0, f)
         }
     }
-}
-
-#[inline]
-pub fn delete_key(key: Key, subkey: impl AsRef<str>) -> Win32Result<()> {
-    winapi::RegDeleteKey(key, subkey, 0)
-}
-#[inline]
-pub fn delete_value(key: Key, value: impl MaybeString) -> Win32Result<()> {
-    winapi::RegDeleteKeyValue(key, value)
-}
-#[inline]
-pub fn delete_tree(key: Key, subkey: impl MaybeString) -> Win32Result<()> {
-    winapi::RegDeleteTree(key, subkey)
-}
-#[inline]
-pub fn open(key: Key, subkey: impl MaybeString, access: u32) -> Win32Result<OwnedKey> {
-    winapi::RegOpenKeyEx(key, subkey, 0, access).map(|v| v.into())
-}
-#[inline]
-pub fn create(key: Key, subkey: impl AsRef<str>, access: u32) -> Win32Result<(OwnedKey, bool)> {
-    winapi::RegCreateKeyEx(key, subkey, None, 0, access, None).map(|v| (v.0.into(), v.1))
 }

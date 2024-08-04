@@ -15,15 +15,23 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use crate::data::blob::Blob;
 use crate::device::winapi;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 const PREFIX: [u8; 8] = [b'\\', b'?', b'?', b'\\', b'U', b'N', b'C', b'\\'];
 
 pub fn normalize_path_to_nt(path: impl AsRef<str>) -> String {
+    // BUG(dij): Not sure if these are bugs we should worry about tbh?
+    // https://googleprojectzero.blogspot.com/2016/02/the-definitive-guide-on-win32-to-nt.html
+    //
+    // "Bugs":
+    // - We're ignoring special device names.
+    // - Adding the "\??\" prefix does NOT change the Win32 path.
+    //
+    // TODO(dij): Do we need to worry about special device names?
     let b = path.as_ref().as_bytes();
     if b.is_empty() {
         return String::new();
@@ -127,8 +135,8 @@ fn check_dots(pos: usize, end: usize, buf: &[u8]) -> usize {
     let (mut p, mut e) = (0, false);
     for i in pos..end {
         match buf[i] {
-            b'.' if !e => (p, e) = (i, true),
-            b'.' => (),
+            b'.' | b' ' if !e => (p, e) = (i, true),
+            b'.' | b' ' => (),
             _ if e => e = false,
             _ => (),
         }
@@ -140,7 +148,7 @@ fn check_dots(pos: usize, end: usize, buf: &[u8]) -> usize {
     }
 }
 fn split_combine(path: &[u8], start: usize) -> (Vec<&[u8]>, usize, bool) {
-    let (mut t, mut x) = (0, start);
+    let (mut t, mut x) = (0usize, start);
     let mut d: Vec<&[u8]> = Vec::new();
     for i in start..path.len() {
         if !sep(path[i]) {
@@ -193,7 +201,7 @@ unsafe fn convert_unc(b: &[u8]) -> String {
     if b.len() == 2 {
         return r;
     }
-    let (mut c, mut s, mut h) = (0, 0, 0);
+    let (mut c, mut s, mut h) = (0u32, 0usize, 0usize);
     for i in 2..b.len() {
         if !sep(b[i]) {
             continue;

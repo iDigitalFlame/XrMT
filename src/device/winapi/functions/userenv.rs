@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
 use core::cmp;
@@ -23,7 +23,7 @@ use core::cmp;
 use crate::data::blob::Blob;
 use crate::device::winapi::loader::userenv;
 use crate::device::winapi::{self, AsHandle, DecodeUtf16, Handle, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 pub fn GetUserProfileDirectory(h: impl AsHandle) -> Win32Result<String> {
     winapi::init_userenv();
@@ -39,8 +39,7 @@ pub fn GetUserProfileDirectory(h: impl AsHandle) -> Win32Result<String> {
     loop {
         b.resize_as_bytes(s as usize);
         match func(v, b.as_mut_ptr(), &mut s) {
-            // SAFETY: The size returned is always smaller than the buffer.
-            1 => return Ok(unsafe { &b.get_unchecked(0..cmp::min(s as usize - 1, b.len())) }.decode_utf16()),
+            1 => return Ok((&b[0..cmp::min(s as usize - 1, b.len())]).decode_utf16()),
             _ if s < b.len() as u32 => return Err(winapi::last_error()),
             _ => (),
         }

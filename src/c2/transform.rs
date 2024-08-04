@@ -16,38 +16,37 @@
 
 #![no_implicit_prelude]
 
-use alloc::boxed::Box;
+use alloc::alloc::Global;
+use core::alloc::Allocator;
+use core::matches;
 
-use crate::util::stx::io::{self, Write};
-use crate::util::stx::prelude::*;
+use crate::io::{self, Write};
+use crate::prelude::*;
 
-pub enum Transform {
+pub enum Transform<'a, A: Allocator = Global> {
     None,
     Base64(u8),
-    DNS(Vec<String>),
+    DNS(Vec<&'a str, A>),
     Custom(Box<dyn CustomTransform>),
 }
 
 pub trait CustomTransform {
-    fn read(&mut self, input: &[u8], output: &mut dyn Write) -> io::Result<()>;
-    fn write(&mut self, input: &[u8], output: &mut dyn Write) -> io::Result<()>;
+    fn read(&self, input: &[u8], output: &mut dyn Write) -> io::Result<()>;
+    fn write(&self, input: &[u8], output: &mut dyn Write) -> io::Result<()>;
 }
 
-impl Transform {
+impl<A: Allocator> Transform<'_, A> {
     #[inline]
     pub fn is_none(&self) -> bool {
-        match self {
-            Transform::None => true,
-            _ => false,
-        }
+        matches!(self, Transform::None)
     }
-    pub fn read(&mut self, input: &[u8], output: &mut impl Write) -> io::Result<()> {
+    pub fn read(&self, input: &[u8], output: &mut impl Write) -> io::Result<()> {
         match self {
             Transform::Custom(c) => c.read(input, output),
             _ => output.write_all(input),
         }
     }
-    pub fn write(&mut self, input: &[u8], output: &mut impl Write) -> io::Result<()> {
+    pub fn write(&self, input: &[u8], output: &mut impl Write) -> io::Result<()> {
         match self {
             Transform::Custom(c) => c.write(input, output),
             _ => output.write_all(input),

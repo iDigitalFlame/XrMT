@@ -17,10 +17,12 @@
 #![no_implicit_prelude]
 
 use core::cmp::Ordering;
+use core::hash::Hasher;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 use core::time::Duration;
 
-use crate::util::stx::prelude::*;
+use crate::data::read_u64;
+use crate::prelude::*;
 
 const DAYS_BEFORE: [u16; 13] = [
     0,
@@ -37,9 +39,8 @@ const DAYS_BEFORE: [u16; 13] = [
     31 + 28 + 31 + 30 + 31 + 30 + 31 + 31 + 30 + 31 + 30,
     31 + 28 + 31 + 30 + 31 + 30 + 31 + 31 + 30 + 31 + 30 + 31,
 ];
-const TIME_OFFSET: i64 = 0xE7791F700;
+const TIME_OFFSET: i64 = 0xE7791F700i64;
 
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Month {
     Invalid   = 0,
@@ -56,7 +57,6 @@ pub enum Month {
     November  = 11,
     December  = 12,
 }
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Weekday {
     Sunday    = 0,
@@ -69,22 +69,23 @@ pub enum Weekday {
     Invalid   = 7,
 }
 
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
 pub struct Time(i64);
 
 impl Time {
+    pub const ZERO: Time = Time(0);
+
     #[inline]
     pub const fn zero() -> Time {
         Time(0)
     }
     #[inline]
-    pub const fn from_unix(sec: i64) -> Time {
+    pub const fn from_nano(sec: i64) -> Time {
         Time(sec + TIME_OFFSET)
     }
     #[inline]
-    pub const fn from_nano(nano_sec: i64) -> Time {
-        let mut s = 0;
-        if nano_sec >= 0x3B9ACA00 {
+    pub const fn from_unix(sec: i64, nano_sec: i64) -> Time {
+        let mut s = sec;
+        if nano_sec < 0 || nano_sec >= 0x3B9ACA00 {
             s += nano_sec / 0x3B9ACA00;
             if nano_sec.wrapping_sub(nano_sec.wrapping_mul(0x3B9ACA00)) < 0 {
                 s -= 1;
@@ -191,7 +192,7 @@ impl Time {
     #[inline]
     pub fn subtract(&self, u: Time) -> Duration {
         if self.is_before(u) {
-            return Duration::new(0, 0);
+            return Duration::ZERO;
         }
         Duration::from_secs((self.unix() - u.unix()) as u64)
     }
@@ -291,11 +292,23 @@ impl Ord for Time {
         self.0.cmp(&other.0)
     }
 }
+impl Hash for Time {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 impl Copy for Time {}
 impl Clone for Time {
     #[inline]
     fn clone(&self) -> Time {
         Time(self.0)
+    }
+}
+impl Default for Time {
+    #[inline]
+    fn default() -> Time {
+        Time::ZERO
     }
 }
 impl From<i64> for Time {
@@ -330,6 +343,12 @@ impl PartialOrd for Time {
         self.0.partial_cmp(&other.0)
     }
 }
+impl From<[u8; 8]> for Time {
+    #[inline]
+    fn from(v: [u8; 8]) -> Time {
+        Time(read_u64(&v) as i64)
+    }
+}
 impl Add<Duration> for Time {
     type Output = Time;
 
@@ -359,10 +378,24 @@ impl SubAssign<Duration> for Time {
     }
 }
 
+impl Eq for Month {}
+impl Ord for Month {
+    #[inline]
+    fn cmp(&self, other: &Month) -> Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+impl Copy for Month {}
+impl Clone for Month {
+    #[inline]
+    fn clone(&self) -> Month {
+        *self
+    }
+}
 impl From<u8> for Month {
     #[inline]
-    fn from(m: u8) -> Month {
-        match m {
+    fn from(v: u8) -> Month {
+        match v {
             0x1 => Month::January,
             0x2 => Month::February,
             0x3 => Month::March,
@@ -379,11 +412,37 @@ impl From<u8> for Month {
         }
     }
 }
+impl PartialEq for Month {
+    #[inline]
+    fn eq(&self, other: &Month) -> bool {
+        *self as u8 == *other as u8
+    }
+}
+impl PartialOrd for Month {
+    #[inline]
+    fn partial_cmp(&self, other: &Month) -> Option<Ordering> {
+        (*self as u8).partial_cmp(&(*other as u8))
+    }
+}
 
+impl Eq for Weekday {}
+impl Ord for Weekday {
+    #[inline]
+    fn cmp(&self, other: &Weekday) -> Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+impl Copy for Weekday {}
+impl Clone for Weekday {
+    #[inline]
+    fn clone(&self) -> Weekday {
+        *self
+    }
+}
 impl From<u8> for Weekday {
     #[inline]
-    fn from(w: u8) -> Weekday {
-        match w {
+    fn from(v: u8) -> Weekday {
+        match v {
             0 => Weekday::Sunday,
             1 => Weekday::Monday,
             2 => Weekday::Tuesday,
@@ -395,28 +454,41 @@ impl From<u8> for Weekday {
         }
     }
 }
+impl PartialEq for Weekday {
+    #[inline]
+    fn eq(&self, other: &Weekday) -> bool {
+        *self as u8 == *other as u8
+    }
+}
+impl PartialOrd for Weekday {
+    #[inline]
+    fn partial_cmp(&self, other: &Weekday) -> Option<Ordering> {
+        (*self as u8).partial_cmp(&(*other as u8))
+    }
+}
 
-#[cfg(windows)]
+#[cfg(target_family = "windows")]
 mod sys {
-    use super::Time;
+    use crate::data::time::Time;
     use crate::device::winapi;
 
     #[inline]
     pub fn now() -> Time {
-        Time::from_nano(winapi::kernel_nano_time())
+        // This outputs the time in UTC.
+        Time::from_unix(0, winapi::kernel_nano_sec_time())
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_vendor = "fortanix")]
 mod sys {
     extern crate std;
 
     use std::time::SystemTime;
 
-    use super::Time;
+    use crate::data::time::Time;
 
     #[inline]
     pub fn now() -> Time {
-        Time::from_unix(
+        Time::from_nano(
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -424,14 +496,35 @@ mod sys {
         )
     }
 }
+#[cfg(all(not(target_family = "windows"), not(target_vendor = "fortanix")))]
+mod sys {
+    extern crate core;
+    extern crate libc;
 
-#[cfg(not(feature = "implant"))]
+    use core::ptr;
+
+    use crate::data::time::Time;
+
+    #[inline]
+    pub fn now() -> Time {
+        // This outputs the time in UTC.
+        Time::from_nano(unsafe { libc::time(ptr::null_mut()) } as i64)
+    }
+}
+
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter};
 
-    use super::{Month, Time, Weekday};
-    use crate::util::stx::prelude::*;
+    use crate::data::time::{Month, Time, Weekday};
+    use crate::prelude::*;
 
+    impl Debug for Time {
+        #[inline]
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_tuple("Time").field(&self.0).finish()
+        }
+    }
     impl Display for Time {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {

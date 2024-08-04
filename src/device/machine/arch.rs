@@ -16,31 +16,24 @@
 
 #![no_implicit_prelude]
 
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
-pub const CURRENT: Architecture = if cfg!(target_arch = "x86_64") {
-    Architecture::X64
-} else if cfg!(any(target_arch = "x86", target_arch = "s390x")) {
-    Architecture::X86
-} else if cfg!(target_arch = "arm") {
-    Architecture::Arm
-} else if cfg!(target_arch = "wasm") {
-    Architecture::Wasm
-} else if cfg!(target_arch = "aarch64") {
-    Architecture::Arm64
-} else if cfg!(target_arch = "loong64") {
-    Architecture::Loong64
-} else if cfg!(any(target_arch = "mips", target_arch = "mips64")) {
-    Architecture::Mips
-} else if cfg!(any(target_arch = "riscv", target_arch = "riscv64")) {
-    Architecture::Risc
-} else if cfg!(any(target_arch = "powerpc", target_arch = "powerpc64")) {
-    Architecture::PowerPc
-} else {
-    Architecture::Unknown
-};
+pub const CURRENT: Architecture = _arch();
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+core::cfg_match! {
+    cfg(target_arch = "x86_64") => { const fn _arch() -> Architecture { Architecture::X64 } }
+    cfg(any(target_arch = "x86", target_arch = "s390x")) => { const fn _arch() -> Architecture { Architecture::X86 } }
+    cfg(target_arch = "arm") => { const fn _arch() -> Architecture { Architecture::Arm } }
+    cfg(any(target_arch = "wasm32", target_arch = "wasm64")) => { const fn _arch() -> Architecture { Architecture::Wasm } }
+    cfg(any(target_arch = "aarch64", target_arch = "arm64ec")) => { const fn _arch() -> Architecture { Architecture::Arm64 } }
+    cfg(target_arch = "loongarch64") => { const fn _arch() -> Architecture { Architecture::Loong64 } }
+    cfg(any(target_arch = "mips", target_arch = "mips32r6", target_arch = "mips64", target_arch = "mips64r6")) => { const fn _arch() -> Architecture { Architecture::Mips } }
+    cfg(any(target_arch = "riscv32", target_arch = "riscv64")) => { const fn _arch() -> Architecture { Architecture::Risc } }
+    cfg(any(target_arch = "powerpc", target_arch = "powerpc64")) => { const fn _arch() -> Architecture { Architecture::PowerPc } }
+    cfg(any(target_arch = "sparc", target_arch = "sparc64")) => { const fn _arch() -> Architecture { Architecture::Sparc } }
+    _ => { const fn _arch() -> Architecture { Architecture::Unknown } }
+}
+
 #[repr(u8)]
 pub enum Architecture {
     X64        = 0x0,
@@ -54,9 +47,19 @@ pub enum Architecture {
     Loong64    = 0x8,
     X86OnX64   = 0x9,
     ArmOnArm64 = 0xA,
+    Sparc      = 0xB, // TODO(dij): NEW!! New proc arch.
+    Emulated   = 0xE, // TODO(dij): NEW!! Emulated MacOS arch.
     Unknown    = 0xF,
 }
 
+impl Eq for Architecture {}
+impl Copy for Architecture {}
+impl Clone for Architecture {
+    #[inline]
+    fn clone(&self) -> Architecture {
+        *self
+    }
+}
 impl From<u8> for Architecture {
     #[inline]
     fn from(v: u8) -> Architecture {
@@ -72,17 +75,25 @@ impl From<u8> for Architecture {
             0x8 => Architecture::Loong64,
             0x9 => Architecture::X86OnX64,
             0xA => Architecture::ArmOnArm64,
+            0xB => Architecture::Sparc,
+            0xE => Architecture::Emulated,
             _ => Architecture::Unknown,
         }
     }
 }
+impl PartialEq for Architecture {
+    #[inline]
+    fn eq(&self, other: &Architecture) -> bool {
+        *self as u8 == *other as u8
+    }
+}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter};
 
-    use super::Architecture;
-    use crate::util::stx::prelude::*;
+    use crate::device::machine::arch::Architecture;
+    use crate::prelude::*;
 
     impl Debug for Architecture {
         #[inline]
@@ -103,6 +114,8 @@ mod display {
                 Architecture::PowerPc => f.write_str("PowerPC"),
                 Architecture::X86OnX64 => f.write_str("32bit [64bit]"),
                 Architecture::ArmOnArm64 => f.write_str("ARM [ARM64]"),
+                Architecture::Sparc => f.write_str("SPARC"),
+                Architecture::Emulated => f.write_str("Emulated"),
                 _ => f.write_str("Unknown"),
             }
         }

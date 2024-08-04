@@ -15,16 +15,15 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::cell::UnsafeCell;
 use core::time::Duration;
 
 use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle};
+use crate::io::{self, Error, ErrorKind};
+use crate::prelude::*;
 use crate::sync::Lazy;
-use crate::util::stx;
-use crate::util::stx::io::{self, Error, ErrorKind};
-use crate::util::stx::prelude::*;
 
 pub struct Mutant {
     lazy:   Lazy,
@@ -45,25 +44,15 @@ impl Mutant {
         Ok(Mutant {
             lazy:   Lazy::new_ready(),
             // 0x1F0003 - FULL_CONTROL
-            handle: UnsafeCell::new(winapi::OpenMutex(0x1F0001, false, n.as_ref()).map_err(Error::from)?),
+            handle: UnsafeCell::new(winapi::OpenMutex(0x1F0001, false, n.as_ref())?),
         })
     }
     #[inline]
     pub fn named(n: impl AsRef<str>) -> io::Result<Mutant> {
         Ok(Mutant {
             lazy:   Lazy::new_ready(),
-            handle: UnsafeCell::new(winapi::CreateMutex(None, false, false, n.as_ref()).map_err(Error::from)?),
+            handle: UnsafeCell::new(winapi::CreateMutex(None, false, false, n.as_ref())?),
         })
-    }
-
-    #[inline]
-    pub unsafe fn close(&self) {
-        if self.lazy.is_ready() {
-            winapi::close_handle(*(*self.handle.get()));
-            unsafe { (*self.handle.get()).set(0) };
-        } else {
-            self.lazy.force()
-        }
     }
 
     #[inline]
@@ -73,10 +62,11 @@ impl Mutant {
     #[inline]
     pub fn lock(&self) -> io::Result<()> {
         self.init(false);
-        winapi::WaitForSingleAsHandle(self, -1, false)
+        winapi::WaitForSingleObject(self, -1, false)
             .map_err(Error::from)
             .and_then(|v| match v {
                 0xC0 => Err(ErrorKind::Interrupted.into()), // STATUS_USER_APC
+                0x80 => Err(ErrorKind::Deadlock.into()),
                 0 => Ok(()),
                 _ => Err(ErrorKind::TimedOut.into()),
             })
@@ -94,13 +84,13 @@ impl Mutant {
         if self.init(true) {
             Ok(true)
         } else {
-            Ok(winapi::WaitForSingleAsHandle(self, 0, false).map_err(Error::from)? == 0)
+            Ok(winapi::WaitForSingleObject(self, 0, false)? == 0)
         }
     }
     #[inline]
     pub fn wait_for(&self, d: Duration) -> io::Result<()> {
         if self.lazy.is_ready() {
-            winapi::WaitForSingleAsHandle(self, d.as_micros() as i32, false)
+            winapi::WaitForSingleObject(self, d.as_micros() as i32, false)
                 .map_err(Error::from)
                 .and_then(|v| match v {
                     0xC0 => Err(ErrorKind::Interrupted.into()), // STATUS_USER_APC
@@ -113,9 +103,19 @@ impl Mutant {
     }
 
     #[inline]
+    pub unsafe fn close(&self) {
+        if self.lazy.is_ready() {
+            winapi::close_handle(*(*self.handle.get()));
+            unsafe { (*self.handle.get()).set(0) };
+        } else {
+            self.lazy.force()
+        }
+    }
+
+    #[inline]
     fn init(&self, initial: bool) -> bool {
         self.lazy
-            .load(|| unsafe { *self.handle.get() = stx::unwrap(winapi::CreateMutex(None, false, initial, None)) })
+            .load(|| unsafe { *self.handle.get() = unwrap(winapi::CreateMutex(None, false, initial, None)) })
     }
 }
 

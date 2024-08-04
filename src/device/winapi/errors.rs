@@ -15,18 +15,18 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::error::Error;
 use core::fmt::{self, Debug, Display, Formatter};
 
 use crate::device::winapi;
 use crate::device::winapi::loader::{kernel32, ntdll};
-use crate::util::stx::io::{self, ErrorKind};
-use crate::util::stx::prelude::*;
+use crate::io::{self, ErrorKind};
+use crate::prelude::*;
+use crate::process::FilterError;
 use crate::util::ToStr;
 
-#[derive(PartialEq, Eq)]
 pub enum Win32Error {
     Code(u32),
     Messsage(String),
@@ -56,6 +56,34 @@ pub enum Win32Error {
 pub type Win32Result<T> = Result<T, Win32Error>;
 
 impl Win32Error {
+    #[inline]
+    pub fn from_code(c: u32) -> Win32Error {
+        match c {
+            0xC0000251 => Win32Error::InvalidDLL,
+            0xC000014B => Win32Error::BrokenPipe,
+            0xC000007F => Win32Error::StorageFull,
+            0xC00000BF => Win32Error::ResourceBusy,
+            0xC0000034 => Win32Error::FileNotFound,
+            0xC000007B => Win32Error::InvalidImage,
+            0xC000000A => Win32Error::InvalidHeader,
+            0xC01E05E4 => Win32Error::InvalidAddress,
+            0xC0000002 => Win32Error::NotImplemented,
+            0xC00000FF => Win32Error::InvalidForward,
+            0xC0000033 => Win32Error::InvalidFilename,
+            0x274C | 0xC00000B5 => Win32Error::TimedOut,
+            0xC0000023 => Win32Error::UnexpectedKeySize,
+            0xC0000024 => Win32Error::UnexpectedKeyType,
+            0xC00000A2 => Win32Error::ReadOnlyFilesystem,
+            0x276D | 0xC0000001 => Win32Error::InvalidOperation,
+            0x271D | 0xC0000022 => Win32Error::PermissionDenied,
+            0x2752 | 0xC0000101 => Win32Error::DirectoryNotEmpty,
+            0x6 | 0x2719 | 0xC0000008 => Win32Error::InvalidHandle,
+            0x57 | 0x2726 | 0xC000000D => Win32Error::InvalidArgument,
+            0x103 | 0x3E4 | 0x3E5 | 0x2733 | 0x2735 => Win32Error::IoPending,
+            _ => Win32Error::Code(c),
+        }
+    }
+
     #[inline]
     pub fn code(&self) -> u32 {
         match self {
@@ -93,7 +121,7 @@ impl Win32Error {
         }
         let e = self.code();
         if e == 0 {
-            return if cfg!(feature = "implant") {
+            return if cfg!(feature = "strip") {
                 "-0x0".to_string()
             } else {
                 "winapi unknown error".to_string()
@@ -103,11 +131,11 @@ impl Win32Error {
     }
     #[inline]
     fn static_message<'a>(&self) -> Option<&'a str> {
-        #[cfg(feature = "implant")]
+        #[cfg(feature = "strip")]
         {
             None
         }
-        #[cfg(not(feature = "implant"))]
+        #[cfg(not(feature = "strip"))]
         match self {
             Win32Error::IoPending => Some("io pending"),
             Win32Error::BrokenPipe => Some("broken pipe"),
@@ -125,6 +153,7 @@ impl Win32Error {
     }
 }
 
+impl Eq for Win32Error {}
 impl Error for Win32Error {
     #[inline]
     fn cause(&self) -> Option<&dyn Error> {
@@ -147,6 +176,15 @@ impl Display for Win32Error {
         match self.static_message() {
             Some(s) => f.write_str(s),
             None => f.write_str(&self.dynamic_mesage()),
+        }
+    }
+}
+impl PartialEq for Win32Error {
+    #[inline]
+    fn eq(&self, other: &Win32Error) -> bool {
+        match (self, other) {
+            (Win32Error::Messsage(v), Win32Error::Messsage(o)) => v.eq(o),
+            _ => self.code() == other.code(),
         }
     }
 }
@@ -182,9 +220,49 @@ impl From<Win32Error> for io::Error {
                 0x274C => ErrorKind::TimedOut.into(),
                 0x274D => ErrorKind::ConnectionRefused.into(),
                 0x2751 => ErrorKind::HostUnreachable.into(),
-                _ => io::Error::new(io::ErrorKind::Other, v),
+                _ => io::Error::new(ErrorKind::Other, v),
             },
-            _ => io::Error::new(io::ErrorKind::Other, v),
+            _ => io::Error::new(ErrorKind::Other, v),
+        }
+    }
+}
+impl From<io::Error> for Win32Error {
+    #[inline]
+    fn from(v: io::Error) -> Win32Error {
+        match v.kind() {
+            ErrorKind::AddrInUse => Win32Error::Code(0x2740),
+            ErrorKind::WouldBlock => Win32Error::Code(0x2733),
+            ErrorKind::NetworkDown => Win32Error::Code(0x2742),
+            ErrorKind::NotConnected => Win32Error::Code(0x2749),
+            ErrorKind::HostUnreachable => Win32Error::Code(0x2751),
+            ErrorKind::ConnectionReset => Win32Error::Code(0x2746),
+            ErrorKind::AddrNotAvailable => Win32Error::Code(0x2741),
+            ErrorKind::ConnectionRefused => Win32Error::Code(0x274D),
+            ErrorKind::ConnectionAborted => Win32Error::Code(0x2745),
+            ErrorKind::NetworkUnreachable => Win32Error::Code(0x2743),
+            ErrorKind::TimedOut => Win32Error::TimedOut,
+            ErrorKind::Interrupted => Win32Error::IoPending,
+            ErrorKind::BrokenPipe => Win32Error::BrokenPipe,
+            ErrorKind::NotFound => Win32Error::FileNotFound,
+            ErrorKind::StorageFull => Win32Error::StorageFull,
+            ErrorKind::ResourceBusy => Win32Error::ResourceBusy,
+            ErrorKind::Unsupported => Win32Error::NotImplemented,
+            ErrorKind::InvalidInput => Win32Error::InvalidArgument,
+            ErrorKind::InvalidData => Win32Error::InvalidOperation,
+            ErrorKind::InvalidFilename => Win32Error::InvalidFilename,
+            ErrorKind::PermissionDenied => Win32Error::PermissionDenied,
+            ErrorKind::ReadOnlyFilesystem => Win32Error::ReadOnlyFilesystem,
+            _ => Win32Error::Messsage(v.to_string()),
+        }
+    }
+}
+impl From<FilterError> for Win32Error {
+    #[inline]
+    fn from(v: FilterError) -> Win32Error {
+        match v {
+            FilterError::NoProcessFound => Win32Error::FileNotFound,
+            FilterError::OsError(c) => Win32Error::Code(c as u32),
+            FilterError::FindError(m) => Win32Error::Messsage(m),
         }
     }
 }
@@ -205,7 +283,7 @@ pub(super) fn nt_error(e: u32) -> Win32Error {
         0xC00000BF => Win32Error::ResourceBusy,
         0xC0000101 => Win32Error::DirectoryNotEmpty,
         0xC000014B => Win32Error::BrokenPipe,
-        _ => format_error(e, true).map_or_else(|| Win32Error::Code(e), |v| Win32Error::Messsage(v)),
+        _ => format_error(e, true).map_or_else(|| Win32Error::Code(e), Win32Error::Messsage),
     }
 }
 
@@ -214,10 +292,10 @@ fn format_error(e: u32, nt: bool) -> Option<String> {
         return None;
     }
     winapi::init_kernel32();
-    if kernel32::FormatMessage == false {
+    if !kernel32::FormatMessage.is_loaded() {
         return None;
     }
-    let mut buf: [u16; 300] = [0; 300];
+    let mut buf = [0u16; 300];
     let mut r = unsafe {
         // 0x3A00 - FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_FROM_HMODULE |
         //          FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS

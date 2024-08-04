@@ -15,12 +15,11 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use crate::device::winapi;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
 pub struct Session {
     pub user:       String,
     pub host:       String,
@@ -32,7 +31,6 @@ pub struct Session {
     pub is_remote:  bool,
     pub status:     u8,
 }
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
 pub struct SessionProcess {
     pub name:       String,
     pub user:       String,
@@ -86,12 +84,29 @@ impl Default for SessionHandle {
     }
 }
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::SessionHandle;
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::{Session, SessionHandle, SessionProcess};
+    use crate::prelude::*;
+
+    impl Debug for Session {
+        #[inline]
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Session")
+                .field("user", &self.user)
+                .field("host", &self.host)
+                .field("domain", &self.domain)
+                .field("login_time", &self.login_time)
+                .field("last_input", &self.last_input)
+                .field("id", &self.id)
+                .field("addr", &self.addr)
+                .field("is_remote", &self.is_remote)
+                .field("status", &self.status)
+                .finish()
+        }
+    }
 
     impl Debug for SessionHandle {
         #[inline]
@@ -115,6 +130,18 @@ mod display {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             UpperHex::fmt(&self.0, f)
+        }
+    }
+
+    impl Debug for SessionProcess {
+        #[inline]
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_struct("SessionProcess")
+                .field("name", &self.name)
+                .field("user", &self.user)
+                .field("session_id", &self.session_id)
+                .field("pid", &self.pid)
+                .finish()
         }
     }
 }

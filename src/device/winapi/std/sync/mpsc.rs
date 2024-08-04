@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
@@ -26,11 +26,11 @@ use core::mem;
 use core::time::Duration;
 
 use crate::device::winapi::{self, AsHandle};
+use crate::ignore_error;
+use crate::io::ErrorKind;
+use crate::prelude::*;
 use crate::sync::Event;
-use crate::util::stx::io;
-use crate::util::stx::prelude::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TryRecvError {
     Empty,
     Disconnected,
@@ -39,10 +39,47 @@ pub enum TrySendError<T> {
     Full(T),
     Disconnected(T),
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RecvTimeoutError {
     Timeout,
     Disconnected,
+}
+
+impl Copy for TryRecvError {}
+impl Clone for TryRecvError {
+    #[inline]
+    fn clone(&self) -> TryRecvError {
+        *self
+    }
+}
+impl Eq for TryRecvError {}
+impl PartialEq for TryRecvError {
+    #[inline]
+    fn eq(&self, other: &TryRecvError) -> bool {
+        match (self, other) {
+            (TryRecvError::Empty, TryRecvError::Empty) => true,
+            (TryRecvError::Disconnected, TryRecvError::Disconnected) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Copy for RecvTimeoutError {}
+impl Clone for RecvTimeoutError {
+    #[inline]
+    fn clone(&self) -> RecvTimeoutError {
+        *self
+    }
+}
+impl Eq for RecvTimeoutError {}
+impl PartialEq for RecvTimeoutError {
+    #[inline]
+    fn eq(&self, other: &RecvTimeoutError) -> bool {
+        match (self, other) {
+            (RecvTimeoutError::Timeout, RecvTimeoutError::Timeout) => true,
+            (RecvTimeoutError::Disconnected, RecvTimeoutError::Disconnected) => true,
+            _ => false,
+        }
+    }
 }
 
 pub struct RecvError;
@@ -76,8 +113,7 @@ impl<T> Inner<T> {
             }
             if let Some(x) = unsafe { &mut *self.entries.get() }.pop_front() {
                 return Ok(x);
-            }
-            if Arc::weak_count(&r.0) == 0 {
+            } else if Arc::weak_count(&r.0) == 0 {
                 return Err(RecvError);
             }
             self.recv.wait() // Wait for another Sender.
@@ -115,20 +151,20 @@ impl<T> Inner<T> {
             // We're a "rendezvous channel".
             // Check if it's empty or someone else is waiting. (Only if we don't)
             // want to wait.
-            if !wait && !v.is_empty() || self.send.is_set() {
+            if !wait && (!v.is_empty() || !self.send.is_set()) {
                 return Err(SendError(value));
             }
             self.send.wait(); // Wait for Receiver to be ready.
             v.push_back(value);
             self.recv.set_ignore(); // Tell Receiver we're ready.
-            self.send.reset_ignore();
+                                    //self.send.reset_ignore();
             return Ok(());
         }
         if v.len() >= self.limit {
             if !wait {
                 return Err(SendError(value));
             }
-            self.send.reset_ignore();
+            //self.send.reset_ignore();
             self.send.wait(); // Wait for Receiver to be ready, then try again.
             return self.push_inner(true, value);
         }
@@ -155,7 +191,7 @@ impl<T> Inner<T> {
             self.send.set_ignore()
         }
         // Wait for a Sender.
-        let _ = self.recv.wait_for(d); // IGNORE ERROR
+        ignore_error!(self.recv.wait_for(d));
         self.pull_try(r).map_err(|e| e.into())
     }
 }
@@ -215,7 +251,7 @@ impl<T> Drop for Sender<T> {
         drop(v); // Update Ref count.
                  // Signal to any receivers that we've dropped.
         if let Some(h) = e {
-            let _ = winapi::SetEvent(h); // IGNORE ERROR
+            ignore_error!(winapi::SetEvent(h));
         }
     }
 }
@@ -234,7 +270,7 @@ impl<T> Drop for SyncSender<T> {
         drop(v); // Update Ref count.
                  // Signal to any receivers that we've dropped.
         if let Some(h) = e {
-            let _ = winapi::SetEvent(h); // IGNORE ERROR
+            ignore_error!(winapi::SetEvent(h));
         }
     }
 }
@@ -310,8 +346,8 @@ impl Display for TryRecvError {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            TryRecvError::Empty => f.write_str(&io::ErrorKind::NotFound.to_string()),
-            TryRecvError::Disconnected => f.write_str(&io::ErrorKind::BrokenPipe.to_string()),
+            TryRecvError::Empty => f.write_str(&ErrorKind::NotFound.to_string()),
+            TryRecvError::Disconnected => f.write_str(&ErrorKind::BrokenPipe.to_string()),
         }
     }
 }
@@ -342,8 +378,8 @@ impl Display for RecvTimeoutError {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            RecvTimeoutError::Timeout => f.write_str(&io::ErrorKind::TimedOut.to_string()),
-            RecvTimeoutError::Disconnected => f.write_str(&io::ErrorKind::BrokenPipe.to_string()),
+            RecvTimeoutError::Timeout => f.write_str(&ErrorKind::TimedOut.to_string()),
+            RecvTimeoutError::Disconnected => f.write_str(&ErrorKind::BrokenPipe.to_string()),
         }
     }
 }
@@ -390,7 +426,7 @@ impl Debug for RecvError {
 impl Display for RecvError {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&io::ErrorKind::BrokenPipe.to_string())
+        f.write_str(&ErrorKind::BrokenPipe.to_string())
     }
 }
 impl PartialEq for RecvError {
@@ -420,7 +456,7 @@ impl<T: Eq> Eq for TrySendError<T> {}
 impl<T> Display for TrySendError<T> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&io::ErrorKind::ResourceBusy.to_string())
+        f.write_str(&ErrorKind::ResourceBusy.to_string())
     }
 }
 impl<T: Copy> Copy for TrySendError<T> {}
@@ -469,7 +505,7 @@ impl<T> Debug for SendError<T> {
 impl<T> Display for SendError<T> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&io::ErrorKind::BrokenPipe.to_string())
+        f.write_str(&ErrorKind::BrokenPipe.to_string())
     }
 }
 impl<T: Eq> Eq for SendError<T> {}
@@ -486,6 +522,9 @@ impl<T: PartialEq> PartialEq<SendError<T>> for SendError<T> {
         self.0 == other.0
     }
 }
+
+unsafe impl<T> Send for Inner<T> {}
+unsafe impl<T> Sync for Inner<T> {}
 
 unsafe impl<T> Send for Sender<T> {}
 unsafe impl<T> Send for Receiver<T> {}

@@ -15,21 +15,22 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
-use core::mem::{self, MaybeUninit};
+use core::mem::{forget, transmute, MaybeUninit};
+use core::num::NonZero;
 use core::ops::Deref;
 use core::time::Duration;
 
+use crate::data::time::Time;
 use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle, Win32Error};
-use crate::util::stx;
-use crate::util::stx::io::{self, Error};
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::io::{self, ErrorKind};
+use crate::prelude::*;
 
-const STACK_SIZE: usize = 0x200000;
+const STACK_SIZE: usize = 0x200000usize;
 
 pub struct Builder {
     stack_size: Option<usize>,
@@ -48,7 +49,7 @@ struct MaybeDangling<T>(MaybeUninit<T>);
 impl Thread {
     #[inline]
     pub fn id(&self) -> ThreadId {
-        winapi::GetThreadID(&self.0).map_or(ThreadId(0), |i| ThreadId(i))
+        winapi::GetThreadID(&self.0).map_or(ThreadId(0u32), ThreadId)
     }
     #[inline]
     pub fn name(&self) -> Option<&str> {
@@ -67,19 +68,12 @@ impl Builder {
         self
     }
     #[inline]
-    pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
-    where
-        F: FnOnce() -> T,
-        F: Send + 'static,
-        T: Send + 'static, {
+    pub fn spawn<'a, F: FnOnce() -> T + Send + 'a, T: Send + 'a>(self, f: F) -> io::Result<JoinHandle<T>> {
         unsafe { self.spawn_unchecked(f) }
     }
+
     #[inline]
-    pub unsafe fn spawn_unchecked<'a, F, T>(self, f: F) -> io::Result<JoinHandle<T>>
-    where
-        F: FnOnce() -> T,
-        F: Send + 'a,
-        T: Send + 'a, {
+    pub unsafe fn spawn_unchecked<'a, F: FnOnce() -> T + Send + 'a, T: Send + 'a>(self, f: F) -> io::Result<JoinHandle<T>> {
         let x: Arc<UnsafeCell<Option<T>>> = Arc::new(UnsafeCell::new(None));
         let i = x.clone();
         let m = MaybeDangling::new(f);
@@ -88,7 +82,7 @@ impl Builder {
             unsafe { *i.get() = Some(r) };
             drop(i);
         };
-        let b = mem::transmute::<Box<dyn FnOnce() + 'a>, Box<dyn FnOnce() + 'static>>(Box::new(func));
+        let b = transmute::<Box<dyn FnOnce() + 'a>, Box<dyn FnOnce() + 'static>>(Box::new(func));
         let a = Box::into_raw(Box::new(b));
         match winapi::CreateThreadEx(
             winapi::CURRENT_PROCESS,
@@ -102,7 +96,7 @@ impl Builder {
                 Err(e.into())
             },
             Ok(h) => {
-                crate::bugtrack!("thread::spawn_unchecked(): Created a new thread 0x{h:X}!");
+                bugtrack!("thread::spawn_unchecked(): Created a new thread 0x{h:X}!");
                 Ok(JoinHandle { result: x, thread: Thread(h) })
             },
         }
@@ -128,8 +122,8 @@ impl<T> JoinHandle<T> {
 
     #[inline]
     fn join_inner(mut self) -> Result<T> {
-        winapi::WaitForSingleAsHandle(self.thread, -1, false).map_err(Error::from)?;
-        stx::take(Arc::get_mut(&mut self.result))
+        winapi::WaitForSingleObject(self.thread, -1, false)?;
+        crate::take(Arc::get_mut(&mut self.result))
             .get_mut()
             .take()
             .ok_or_else(|| Win32Error::IoPending.into())
@@ -144,7 +138,7 @@ impl<T> MaybeDangling<T> {
     #[inline]
     fn into_inner(self) -> T {
         let r = unsafe { self.0.assume_init_read() };
-        mem::forget(self);
+        forget(self);
         r
     }
 }
@@ -219,7 +213,7 @@ unsafe impl<T> Sync for JoinHandle<T> {}
 
 #[inline]
 pub fn yield_now() {
-    let _ = winapi::NtYieldExecution(); // IGNORE ERROR
+    ignore_error!(winapi::NtYieldExecution());
 }
 #[inline]
 pub fn current() -> Thread {
@@ -228,18 +222,40 @@ pub fn current() -> Thread {
 }
 #[inline]
 pub fn sleep(dur: Duration) {
-    let _ = winapi::SleepEx(dur.as_micros() as i64, false); // IGNORE ERROR
+    ignore_error!(winapi::SleepEx(dur.as_micros() as i64, false));
 }
 #[inline]
-pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-where
-    F: FnOnce() -> T,
-    F: Send + 'static,
-    T: Send + 'static, {
-    stx::unwrap(Builder::new().spawn(f))
+pub fn sleep_until(deadline: Time) {
+    let d = deadline - Time::now();
+    if !d.is_zero() {
+        sleep(d)
+    }
+}
+#[inline]
+pub fn available_parallelism() -> Result<NonZero<usize>> {
+    NonZero::new(winapi::GetCurrentProcessPEB().number_of_processors as usize).ok_or_else(|| ErrorKind::InvalidData.into())
+}
+#[inline]
+pub fn spawn<F: FnOnce() -> T + Send + 'static, T: Send + 'static>(f: F) -> JoinHandle<T> {
+    unwrap_unlikely(Builder::new().spawn(f))
 }
 
 extern "system" fn thread_main(func: usize) -> u32 {
     unsafe { Box::from_raw(func as *mut Box<dyn FnOnce()>)() };
     0
+}
+
+#[cfg(not(feature = "strip"))]
+mod display {
+    use core::fmt::{self, Debug, Formatter};
+
+    use crate::prelude::*;
+    use crate::thread::Thread;
+
+    impl Debug for Thread {
+        #[inline]
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_tuple("Thread").field(&self.0).finish()
+        }
+    }
 }

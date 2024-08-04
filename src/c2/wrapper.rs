@@ -16,44 +16,43 @@
 
 #![no_implicit_prelude]
 
-use alloc::boxed::Box;
+use alloc::alloc::Global;
+use core::alloc::Allocator;
+use core::matches;
 
-use crate::data::blob::Blob;
-use crate::util::stx::io::{self, Read, Write};
-use crate::util::stx::prelude::*;
+use crate::io::{self, Read, Write};
+use crate::prelude::*;
 
-pub enum Wrapper {
+pub enum Wrapper<'a, A: Allocator = Global> {
     None,
     Hex,
     Base64,
-    Zlib(u8),
-    Gzip(u8),
-    XOR(Blob<u8, 64>),
+    Zlib,
+    Gzip,
+    XOR(&'a [u8]),
     CBK(u8, u8, u8, u8, u8),
-    AES(([u8; 32], [u8; 16])),
+    AES(&'a [u8], &'a [u8]),
     Custom(Box<dyn CustomWrapper>),
+    Multiple(Vec<Wrapper<'a, A>, A>),
 }
 
 pub trait CustomWrapper {
-    fn wrap<'a>(&mut self, input: &'a mut dyn Write) -> io::Result<&mut (dyn Write + 'a)>;
-    fn unwrap<'a>(&mut self, input: &'a mut dyn Read) -> io::Result<&mut (dyn Read + 'a)>;
+    fn wrap<'a>(&self, input: &'a mut dyn Write) -> io::Result<&mut (dyn Write + 'a)>;
+    fn unwrap<'a>(&self, input: &'a mut dyn Read) -> io::Result<&mut (dyn Read + 'a)>;
 }
 
-impl Wrapper {
+impl<'a, A: Allocator> Wrapper<'_, A> {
     #[inline]
     pub fn is_none(&self) -> bool {
-        match self {
-            Wrapper::None => true,
-            _ => false,
-        }
+        matches!(self, Wrapper::None)
     }
-    pub fn wrap<'a>(&mut self, input: &'a mut impl Write) -> io::Result<&mut (dyn Write + 'a)> {
+    pub fn wrap(&self, input: &'a mut impl Write) -> io::Result<&mut (dyn Write + 'a)> {
         match self {
             Wrapper::Custom(c) => c.wrap(input),
             _ => Ok(input),
         }
     }
-    pub fn unwrap<'a>(&mut self, input: &'a mut impl Read) -> io::Result<&mut (dyn Read + 'a)> {
+    pub fn unwrap(&self, input: &'a mut impl Read) -> io::Result<&mut (dyn Read + 'a)> {
         match self {
             Wrapper::Custom(c) => c.unwrap(input),
             _ => Ok(input),

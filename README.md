@@ -90,3 +90,15 @@ _If you really want to use std with Windows, enable it with the `std` feature fl
 | std/ffi      | xrmt::util::stx::ffi                             |
 | std/path     | xrmt::util::stx::ffi _(path & ffi are combined)_ |
 | std/preclude | xrmt::util::stx::preclude _(uses 2021 preclude)_ |
+
+## Limitations
+
+- Solaris
+  - Can't get the Mac Address for some reason. The OS does not give it to us.
+  - Not possible to determine threads for processes.
+- MacOS
+  - No thread support. We can do it, but you have to have a signed binary with a
+    special permission set to read other processes's threads
+- NetBSD
+  - Thread support works, but it's not super stable as the way it indicates
+    Threads is kina weird. THey don't have TIDs but can be enumerated at least

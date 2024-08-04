@@ -15,16 +15,16 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::cell::UnsafeCell;
 use core::time::Duration;
 
 use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle};
+use crate::ignore_error;
+use crate::io::{self, Error, ErrorKind};
+use crate::prelude::*;
 use crate::sync::Lazy;
-use crate::util::stx;
-use crate::util::stx::io::{self, Error, ErrorKind};
-use crate::util::stx::prelude::*;
 
 pub struct Event {
     lazy:   Lazy,
@@ -52,35 +52,35 @@ impl Event {
     pub fn named(n: impl AsRef<str>) -> io::Result<Event> {
         Ok(Event {
             lazy:   Lazy::new_ready(),
-            handle: UnsafeCell::new(winapi::CreateEvent(None, false, false, true, n.as_ref()).map_err(Error::from)?),
+            handle: UnsafeCell::new(winapi::CreateEvent(None, false, false, false, n.as_ref()).map_err(Error::from)?),
         })
     }
 
     #[inline]
     pub fn wait(&self) {
         self.init(false);
-        let _ = winapi::WaitForSingleAsHandle(self, -1, false); // IGNORE ERROR
+        ignore_error!(winapi::WaitForSingleObject(self, -1, false));
     }
     #[inline]
     pub fn set_ignore(&self) {
         if self.init(true) {
             return;
         }
-        let _ = winapi::SetEvent(self); // IGNORE ERROR
+        ignore_error!(winapi::SetEvent(self));
     }
     #[inline]
     pub fn reset_ignore(&self) {
         if self.init(false) {
             return;
         }
-        let _ = winapi::ResetEvent(self); // IGNORE ERROR
+        ignore_error!(winapi::ResetEvent(self));
     }
     #[inline]
     pub fn signal_ignore(&self) {
         if !self.init(true) {
-            let _ = self.set(); // IGNORE ERROR
+            ignore_error!(self.set());
         }
-        let _ = self.reset(); // IGNORE ERROR
+        ignore_error!(self.reset());
     }
     #[inline]
     pub fn is_set(&self) -> bool {
@@ -112,7 +112,7 @@ impl Event {
     #[inline]
     pub fn wait_for(&self, d: Duration) -> io::Result<()> {
         self.init(false);
-        winapi::WaitForSingleAsHandle(self, d.as_millis() as i32, false)
+        winapi::WaitForSingleObject(self, d.as_micros() as i32, false)
             .map_err(Error::from)
             .and_then(|v| match v {
                 0xC0 => Err(ErrorKind::Interrupted.into()), // STATUS_USER_APC
@@ -124,7 +124,7 @@ impl Event {
     #[inline]
     fn init(&self, initial: bool) -> bool {
         self.lazy
-            .load(|| unsafe { *self.handle.get() = stx::unwrap(winapi::CreateEvent(None, false, initial, true, None)) })
+            .load(|| unsafe { *self.handle.get() = unwrap(winapi::CreateEvent(None, false, initial, false, None)) })
     }
 }
 

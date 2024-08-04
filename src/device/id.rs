@@ -16,30 +16,30 @@
 
 #![no_implicit_prelude]
 
-extern crate hmac_sha256;
+use core::alloc::Allocator;
 
-use hmac_sha256::HMAC; // TODO(dij): I think we can re-write an optimized version?
-
-use crate::data::{self, Readable, Reader, Writable, Writer};
-use crate::device::rand;
+use crate::data::crypto::hmac;
+use crate::data::rand::system_rand;
+use crate::data::{read_full, write_full, Readable, Reader, Writable, Writer};
+use crate::ignore_error;
+use crate::io::{self, Read, Write};
+use crate::prelude::*;
 use crate::util::crypt;
-use crate::util::stx::io::{self, Read, Write};
-use crate::util::stx::prelude::*;
 
 pub struct ID([u8; 32]);
 
 impl ID {
-    pub const SIZE: u8 = 32;
-    pub const MACHINE_SIZE: u8 = 28;
+    pub const SIZE: u8 = 32u8;
+    pub const MACHINE_SIZE: u8 = 28u8;
 
     #[inline]
-    fn new() -> ID {
-        ID([0; 32])
+    pub const fn new() -> ID {
+        ID([0u8; 32])
     }
 
     #[inline]
     pub fn hash(&self) -> u32 {
-        let mut h: u32 = 0x811C9DC5;
+        let mut h = 0x811C9DC5u32;
         for i in self.0 {
             h = h.wrapping_mul(0x1000193);
             h ^= i as u32;
@@ -52,14 +52,15 @@ impl ID {
     }
     #[inline]
     pub fn write(&self, w: &mut impl Write) -> io::Result<()> {
-        data::write_full(w, &self.0)
+        write_full(w, &self.0)
     }
     #[inline]
     pub fn read(&mut self, r: &mut impl Read) -> io::Result<()> {
-        data::read_full(r, &mut self.0)
+        read_full(r, &mut self.0)
     }
 }
 
+impl Eq for ID {}
 impl Copy for ID {}
 impl Clone for ID {
     #[inline]
@@ -76,30 +77,32 @@ impl Default for ID {
 impl Writable for ID {
     #[inline]
     fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
-        data::write_full(w, &self.0)
+        write_full(w, &self.0)
     }
 }
 impl Readable for ID {
     #[inline]
     fn read_stream(&mut self, r: &mut impl Reader) -> io::Result<()> {
-        data::read_full(r, &mut self.0)
+        read_full(r, &mut self.0)
     }
 }
-impl From<Option<Vec<u8>>> for ID {
-    fn from(v: Option<Vec<u8>>) -> ID {
+impl PartialEq for ID {
+    #[inline]
+    fn eq(&self, other: &ID) -> bool {
+        self.0 == other.0
+    }
+}
+impl<A: Allocator> From<Option<Vec<u8, A>>> for ID {
+    fn from(v: Option<Vec<u8, A>>) -> ID {
         let mut i = match v {
-            Some(x) => {
-                let mut h = HMAC::new(&x);
-                h.update(crypt::get_or(0, "framework-v7").as_bytes());
-                ID(h.finalize())
-            },
+            Some(x) => ID(hmac(&x, crypt::get_or(0, "framework-v7").as_bytes())),
             None => {
                 let mut i = ID::new();
-                let _ = rand::system_rand(&mut i.0); // IGNORE ERROR
+                ignore_error!(system_rand(&mut i.0));
                 i
             },
         };
-        let _ = rand::system_rand(&mut i.0[ID::MACHINE_SIZE as usize + 1..]); // IGNORE ERROR
+        ignore_error!(system_rand(&mut i.0[ID::MACHINE_SIZE as usize + 1..]));
         if i.0[0] == 0 {
             i.0[0] = 1;
         }
@@ -110,12 +113,12 @@ impl From<Option<Vec<u8>>> for ID {
     }
 }
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::ID;
-    use crate::util::stx::prelude::*;
+    use crate::device::ID;
+    use crate::prelude::*;
     use crate::util::HEXTABLE;
 
     impl ID {
@@ -148,7 +151,7 @@ mod display {
     impl Debug for ID {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.debug_tuple("ID").field(&self.full()).finish()
+            Display::fmt(self, f)
         }
     }
     impl Display for ID {

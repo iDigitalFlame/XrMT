@@ -15,17 +15,17 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
 use crate::data::blob::Blob;
 use crate::device::winapi::loader::iphlpapi;
 use crate::device::winapi::{self, Adapter, Win32Error, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 pub fn GetAdaptersAddresses(family: u32, flags: u32, buf: &mut Blob<u8, 256>) -> Win32Result<Vec<&Adapter>> {
     winapi::init_iphlpapi();
-    let mut s: u32 = 15000u32;
+    let mut s: u32 = 2048u32;
     let func = unsafe {
         winapi::make_syscall!(
             *iphlpapi::GetAdaptersAddresses,
@@ -38,7 +38,7 @@ pub fn GetAdaptersAddresses(family: u32, flags: u32, buf: &mut Blob<u8, 256>) ->
         match r {
             0x6F => continue, // 0x6F - ERROR_BUFFER_OVERFLOW
             0 => return Ok(buf.as_ref_of::<Adapter>().enumerate().collect()),
-            _ => return Err(Win32Error::Code(r)),
+            _ => return Err(Win32Error::from_code(r)),
         }
     }
 }

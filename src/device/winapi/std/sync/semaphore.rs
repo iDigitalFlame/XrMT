@@ -15,13 +15,14 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::time::Duration;
 
 use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle};
-use crate::util::stx::io::{self, Error, ErrorKind};
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::io::{self, Error, ErrorKind};
+use crate::prelude::*;
 
 pub struct Semaphore(OwnedHandle);
 
@@ -34,14 +35,14 @@ impl Semaphore {
     pub fn open(n: impl AsRef<str>) -> io::Result<Semaphore> {
         Ok(Semaphore(
             // 0x1F0003 - FULL_CONTROL
-            winapi::OpenSemaphore(0x1F0003, false, n.as_ref()).map_err(Error::from)?,
+            winapi::OpenSemaphore(0x1F0003, false, n.as_ref())?,
         ))
     }
     #[inline]
     pub fn starting_with(limit: u32, start: u32) -> io::Result<Semaphore> {
-        Ok(Semaphore(
-            winapi::CreateSemaphore(None, false, start, limit, None).map_err(Error::from)?,
-        ))
+        Ok(Semaphore(winapi::CreateSemaphore(
+            None, false, start, limit, None,
+        )?))
     }
     #[inline]
     pub fn named(limit: u32, n: impl AsRef<str>) -> io::Result<Semaphore> {
@@ -49,14 +50,18 @@ impl Semaphore {
     }
     #[inline]
     pub fn named_starting_with(limit: u32, start: u32, n: impl AsRef<str>) -> io::Result<Semaphore> {
-        Ok(Semaphore(
-            winapi::CreateSemaphore(None, false, start, limit, n.as_ref()).map_err(Error::from)?,
-        ))
+        Ok(Semaphore(winapi::CreateSemaphore(
+            None,
+            false,
+            start,
+            limit,
+            n.as_ref(),
+        )?))
     }
 
     #[inline]
     pub fn wait(&self) {
-        let _ = winapi::WaitForSingleAsHandle(self, -1, false); // IGNORE ERROR
+        ignore_error!(winapi::WaitForSingleObject(self, -1, false));
     }
     #[inline]
     pub fn limit(&self) -> u32 {
@@ -76,7 +81,7 @@ impl Semaphore {
     }
     #[inline]
     pub fn wait_for(&self, d: Duration) -> io::Result<()> {
-        winapi::WaitForSingleAsHandle(self, d.as_micros() as i32, false)
+        winapi::WaitForSingleObject(self, d.as_micros() as i32, false)
             .map_err(Error::from)
             .and_then(|v| match v {
                 0xC0 => Err(ErrorKind::Interrupted.into()), // STATUS_USER_APC

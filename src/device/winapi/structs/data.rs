@@ -15,12 +15,13 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use core::{mem, ptr};
+use core::mem::{size_of, transmute};
+use core::ptr;
 
-use crate::device::winapi::{self, Handle, SecAttrs, SecQoS, SecurityDescriptor, SecurityQualityOfService, UnicodeString};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{Handle, SecAttrs, SecQoS, SecurityDescriptor, SecurityQualityOfService, UnicodeString};
+use crate::prelude::*;
 
 #[repr(C)]
 pub struct FileTime {
@@ -36,12 +37,14 @@ pub struct Overlapped {
     pub event:         Handle,
 }
 #[repr(C)]
-pub struct FileBasicInfo {
-    pub creation_time:    i64,
-    pub last_access_time: i64,
-    pub last_write_time:  i64,
-    pub change_time:      i64,
-    pub attributes:       u32,
+pub struct DiskGeometry {
+    pub cylinders:           u64,
+    pub media_type:          u32,
+    pub tracks_per_cylinder: u32,
+    pub sectors_per_track:   u32,
+    pub bytes_per_sector:    u32,
+    pub size:                u64,
+    pad:                     usize,
 }
 #[repr(C)]
 pub struct ObjectAttributes {
@@ -51,14 +54,6 @@ pub struct ObjectAttributes {
     pub attributes:          u32,
     pub security_descriptor: *mut SecurityDescriptor,
     pub security_qos:        *const SecurityQualityOfService,
-}
-#[repr(C)]
-pub struct FileStandardInfo {
-    pub allocation_size: u64,
-    pub end_of_file:     u64,
-    pub number_of_links: u32,
-    pub delete_pending:  u32,
-    pub is_directory:    u32,
 }
 #[repr(C)]
 pub struct FileIdBothDirInfo {
@@ -79,6 +74,19 @@ pub struct FileIdBothDirInfo {
     pub file_name:         [u16; 1],
 }
 #[repr(C)]
+pub struct FileAllInformation {
+    pub basic:          FileBasicInformation,
+    pub standard:       FileStandardInformation,
+    pub file_id:        u64,
+    pub ea_size:        u32,
+    pub access:         u32,
+    pub current_offset: u64,
+    pub mode:           u32,
+    pub alignment:      u32,
+    pub name_length:    u32,
+    pub name:           [u16; 256],
+}
+#[repr(C)]
 pub struct FileStatInformation {
     pub file_id:          u64,
     pub creation_time:    i64,
@@ -91,6 +99,14 @@ pub struct FileStatInformation {
     pub reparse_tag:      u32,
     pub number_of_links:  u32,
     pub access:           u32,
+}
+#[repr(C)]
+pub struct FileBasicInformation {
+    pub creation_time:    i64,
+    pub last_access_time: i64,
+    pub last_write_time:  i64,
+    pub change_time:      i64,
+    pub attributes:       u32,
 }
 #[repr(C)]
 pub struct ObjectBasicInformation {
@@ -106,13 +122,21 @@ pub struct ObjectBasicInformation {
     pub sec_desc_size:  u32,
     pub created:        u64,
 }
+#[repr(C)]
+pub struct FileStandardInformation {
+    pub allocation_size: u64,
+    pub end_of_file:     u64,
+    pub number_of_links: u32,
+    pub delete_pending:  u32,
+    pub is_directory:    u32,
+}
 
 pub type OverlappedIo<'a> = Option<&'a mut Overlapped>;
 
 impl FileTime {
     #[inline]
-    pub fn as_nano(&self) -> u64 {
-        unsafe { core::mem::transmute::<FileTime, u64>(*self) }
+    pub fn as_unix(&self) -> u64 {
+        unsafe { transmute::<FileTime, u64>(*self) }
             .reverse_bits()
             .saturating_div(100)
     }
@@ -120,11 +144,11 @@ impl FileTime {
 impl ObjectAttributes {
     #[inline]
     pub fn new(name: Option<&UnicodeString>, inherit: bool, attrs: u32, sa: SecAttrs, qos: SecQoS) -> ObjectAttributes {
-        ObjectAttributes::root(name, winapi::INVALID, inherit, attrs, sa, qos)
+        ObjectAttributes::root(name, Handle::INVALID, inherit, attrs, sa, qos)
     }
     pub fn root(name: Option<&UnicodeString>, root: Handle, inherit: bool, attrs: u32, sa: SecAttrs, qos: SecQoS) -> ObjectAttributes {
         let mut o = ObjectAttributes {
-            length:              mem::size_of::<ObjectAttributes>() as u32,
+            length:              size_of::<ObjectAttributes>() as u32,
             attributes:          attrs | if inherit { 0x2 } else { 0 }, // 0x2 - OBJ_INHERIT,
             object_name:         ptr::null_mut(),
             security_qos:        ptr::null_mut(),
@@ -157,13 +181,13 @@ impl Clone for FileTime {
 impl Default for FileTime {
     #[inline]
     fn default() -> FileTime {
-        FileTime { low: 0, high: 0 }
+        FileTime { low: 0u32, high: 0u32 }
     }
 }
 impl From<u64> for FileTime {
     #[inline]
     fn from(v: u64) -> FileTime {
-        unsafe { mem::transmute(v.reverse_bits()) }
+        unsafe { transmute(v.reverse_bits()) }
     }
 }
 
@@ -171,33 +195,34 @@ impl Default for Overlapped {
     #[inline]
     fn default() -> Overlapped {
         Overlapped {
-            event:         Handle::default(),
-            internal:      0,
-            internal_high: 0,
-            offset:        0,
-            offset_high:   0,
+            event:         Handle::INVALID,
+            internal:      0usize,
+            internal_high: 0usize,
+            offset:        0u32,
+            offset_high:   0u32,
         }
     }
 }
-impl Default for FileBasicInfo {
+impl Default for DiskGeometry {
     #[inline]
-    fn default() -> FileBasicInfo {
-        FileBasicInfo {
-            attributes:       0,
-            change_time:      0,
-            creation_time:    0,
-            last_write_time:  0,
-            last_access_time: 0,
+    fn default() -> DiskGeometry {
+        DiskGeometry {
+            pad:                 0usize,
+            size:                0u64,
+            cylinders:           0u64,
+            media_type:          0u32,
+            bytes_per_sector:    0u32,
+            sectors_per_track:   0u32,
+            tracks_per_cylinder: 0u32,
         }
     }
 }
-
 impl Default for ObjectAttributes {
     #[inline]
     fn default() -> ObjectAttributes {
         ObjectAttributes {
-            length:              mem::size_of::<ObjectAttributes>() as u32,
-            attributes:          0,
+            length:              size_of::<ObjectAttributes>() as u32,
+            attributes:          0u32,
             object_name:         ptr::null_mut(),
             security_qos:        ptr::null_mut(),
             root_directory:      Handle::default(),
@@ -205,15 +230,20 @@ impl Default for ObjectAttributes {
         }
     }
 }
-impl Default for FileStandardInfo {
+impl Default for FileAllInformation {
     #[inline]
-    fn default() -> FileStandardInfo {
-        FileStandardInfo {
-            end_of_file:     0,
-            is_directory:    0,
-            delete_pending:  0,
-            allocation_size: 0,
-            number_of_links: 0,
+    fn default() -> FileAllInformation {
+        FileAllInformation {
+            mode:           0u32,
+            name:           [0u16; 256],
+            basic:          FileBasicInformation::default(),
+            access:         0u32,
+            file_id:        0u64,
+            ea_size:        0u32,
+            standard:       FileStandardInformation::default(),
+            alignment:      0u32,
+            name_length:    0u32,
+            current_offset: 0u64,
         }
     }
 }
@@ -221,17 +251,29 @@ impl Default for FileStatInformation {
     #[inline]
     fn default() -> FileStatInformation {
         FileStatInformation {
-            access:           0,
-            file_id:          0,
-            attributes:       0,
-            change_time:      0,
-            end_of_file:      0,
-            reparse_tag:      0,
-            creation_time:    0,
-            last_write_time:  0,
-            allocation_size:  0,
-            number_of_links:  0,
-            last_access_time: 0,
+            access:           0u32,
+            file_id:          0u64,
+            attributes:       0u32,
+            change_time:      0i64,
+            end_of_file:      0u64,
+            reparse_tag:      0u32,
+            creation_time:    0i64,
+            last_write_time:  0i64,
+            allocation_size:  0u64,
+            number_of_links:  0u32,
+            last_access_time: 0i64,
+        }
+    }
+}
+impl Default for FileBasicInformation {
+    #[inline]
+    fn default() -> FileBasicInformation {
+        FileBasicInformation {
+            attributes:       0u32,
+            change_time:      0i64,
+            creation_time:    0i64,
+            last_write_time:  0i64,
+            last_access_time: 0i64,
         }
     }
 }
@@ -239,17 +281,36 @@ impl Default for ObjectBasicInformation {
     #[inline]
     fn default() -> ObjectBasicInformation {
         ObjectBasicInformation {
-            pad:            [0; 3],
-            access:         0,
-            handles:        0,
-            created:        0,
-            pointers:       0,
-            name_size:      0,
-            type_size:      0,
-            paged_pool:     0,
-            attributes:     0,
-            sec_desc_size:  0,
-            non_paged_pool: 0,
+            pad:            [0u32; 3],
+            access:         0u32,
+            handles:        0u32,
+            created:        0u64,
+            pointers:       0u32,
+            name_size:      0u32,
+            type_size:      0u32,
+            paged_pool:     0u32,
+            attributes:     0u32,
+            sec_desc_size:  0u32,
+            non_paged_pool: 0u32,
         }
     }
+}
+impl Default for FileStandardInformation {
+    #[inline]
+    fn default() -> FileStandardInformation {
+        FileStandardInformation {
+            end_of_file:     0u64,
+            is_directory:    0u32,
+            delete_pending:  0u32,
+            allocation_size: 0u64,
+            number_of_links: 0u32,
+        }
+    }
+}
+
+pub(crate) unsafe extern "stdcall" fn _copy_file_ex(_z: u64, _t: u64, _c: u64, n: u64, i: u32, _r: u32, _s: usize, _d: usize, d: *mut usize) -> u32 {
+    if i == 1 {
+        *(d as *mut u64) = n;
+    }
+    0
 }

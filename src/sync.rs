@@ -16,21 +16,51 @@
 
 #![no_implicit_prelude]
 
+pub use self::arc::*;
+pub use self::group::*;
 pub use self::inner::*;
 
-#[cfg(unix)]
+mod arc;
+mod group;
+
+#[cfg(not(target_family = "windows"))]
+#[path = "sync"]
 mod inner {
     extern crate std;
     pub use std::sync::*;
+
+    mod event;
+    pub use self::event::*;
 }
-#[cfg(windows)]
+#[cfg(all(target_family = "windows", feature = "std"))]
+#[path = "device/winapi/std/sync"]
+mod inner {
+    extern crate core;
+    extern crate std;
+
+    mod event;
+    mod lazy;
+    pub mod mpsc;
+    mod mutant;
+    mod semaphore;
+    mod timer;
+
+    pub use core::sync::*;
+    pub use std::sync::*;
+
+    pub use self::event::*;
+    pub(crate) use self::lazy::*;
+    pub use self::mutant::*;
+    pub use self::semaphore::*;
+    pub use self::timer::*;
+}
+#[cfg(all(target_family = "windows", not(feature = "std")))]
 #[path = "device/winapi/std/sync"]
 mod inner {
     extern crate core;
 
     mod barrier;
     mod event;
-    mod group;
     mod lazy;
     mod lazylock;
     pub mod mpsc;
@@ -44,7 +74,6 @@ mod inner {
 
     pub use self::barrier::*;
     pub use self::event::*;
-    pub use self::group::*;
     pub(crate) use self::lazy::*;
     pub use self::lazylock::*;
     pub use self::mutant::*;

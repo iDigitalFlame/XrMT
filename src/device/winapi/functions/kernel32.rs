@@ -15,20 +15,63 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
 use core::{cmp, ptr};
 
 use crate::data::blob::Blob;
+use crate::data::str::MaybeString;
 use crate::device::winapi::loader::kernel32;
-use crate::device::winapi::{self, DecodeUtf16, Handle, MaybeString, ProcessInfo, SecAttrs, SecurityAttributes, StartInfo, WChars, Win32Error, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{self, DecodeUtf16, Handle, OsVersionInfo, ProcessInfo, SecAttrs, SecurityAttributes, StartInfo, WChars, Win32Error, Win32Result};
+use crate::prelude::*;
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 #[cfg(feature = "snap")]
 pub use self::snap::*;
 
+const TEMP_1: [u16; 3] = [b'T' as u16, b'M' as u16, b'P' as u16];
+const TEMP_2: [u16; 4] = [b'T' as u16, b'E' as u16, b'M' as u16, b'P' as u16];
+const TEMP_3: [u16; 11] = [
+    b'U' as u16,
+    b'S' as u16,
+    b'E' as u16,
+    b'R' as u16,
+    b'P' as u16,
+    b'R' as u16,
+    b'O' as u16,
+    b'F' as u16,
+    b'I' as u16,
+    b'L' as u16,
+    b'E' as u16,
+];
+
+pub fn GetTempPath() -> String {
+    let mut d = winapi::GetEnvironment()
+        .iter()
+        .find(|v| v.is_key(&TEMP_1) || v.is_key(&TEMP_2))
+        .and_then(|v| v.value_as_string())
+        .unwrap_or_else(|| {
+            winapi::GetEnvironment()
+                .iter()
+                .find(|v| v.is_key(&TEMP_3))
+                .and_then(|v| v.value_as_string())
+                .unwrap_or_else(|| {
+                    winapi::current_token(0x8)
+                        .and_then(winapi::GetUserProfileDirectory)
+                        .unwrap_or_else(|_| winapi::system_root().to_string())
+                })
+        });
+    // ^
+    // 1. Try %TEMP% and %TEMP%
+    // 2. Try %USERPROFILE%
+    // 3. Use 'GetUserProfileDirectory()'
+    // 4. Use the Windows directory.
+    if !d.as_bytes().last().map_or(true, |v| *v == b'\\') {
+        d.push('\\' as char);
+    }
+    d
+}
 #[inline]
 pub fn LocalFree<T>(v: *const T) {
     if v.is_null() {
@@ -36,25 +79,6 @@ pub fn LocalFree<T>(v: *const T) {
     }
     winapi::init_kernel32();
     unsafe { winapi::syscall!(*kernel32::LocalFree, extern "stdcall" fn(*const T), v) }
-}
-pub fn GetTempPath() -> Win32Result<String> {
-    winapi::init_kernel32();
-    let mut buf = [0u16; 261];
-    let r = unsafe {
-        winapi::syscall!(
-            *kernel32::GetTempPath,
-            extern "stdcall" fn(u32, *mut u16) -> u32,
-            261,
-            buf.as_mut_ptr()
-        )
-    };
-    if r == 0 {
-        Err(winapi::last_error())
-    } else {
-        // SAFETY: The OS returns the valid amount of chars which is ALWAYS
-        // greater than the size of the buffer, which is always 261.
-        Ok(unsafe { &buf.get_unchecked(0..cmp::min(r as usize, 261)) }.decode_utf16())
-    }
 }
 pub fn GetComputerName() -> Win32Result<String> {
     winapi::init_kernel32();
@@ -70,18 +94,30 @@ pub fn GetComputerName() -> Win32Result<String> {
         b.resize(s as usize);
         // 0x5 - ComputerNamePhysicalDnsHostname
         if func(0x5, b.as_mut_ptr(), &mut s) == 1 {
-            // SAFETY: The OS returns the valid amount of chars which is ALWAYS
-            // greater than the size of the buffer.
-            return Ok(unsafe { &b.get_unchecked(0..cmp::min(s as usize, b.len()) as usize) }.decode_utf16());
+            return Ok((&b[0..cmp::min(s as usize, b.len() as usize)]).decode_utf16());
         }
         let e = winapi::GetLastError();
         if e != 0xEA || s < b.len() as u32 {
             // 0xEA - ERROR_MORE_DATA
-            return Err(Win32Error::Code(e));
+            return Err(Win32Error::from_code(e));
         }
     }
 }
-
+pub fn GetVersion() -> Win32Result<OsVersionInfo> {
+    let mut i = OsVersionInfo::default();
+    let r = unsafe {
+        winapi::syscall!(
+            *kernel32::GetVersionExW,
+            extern "stdcall" fn(*mut OsVersionInfo) -> u32,
+            &mut i
+        )
+    };
+    if r == 0 {
+        Err(winapi::last_error())
+    } else {
+        Ok(i)
+    }
+}
 pub fn WriteConsole(h: Handle, buf: &[u8]) -> Win32Result<usize> {
     winapi::init_kernel32();
     let mut n = 0u32;
@@ -91,12 +127,12 @@ pub fn WriteConsole(h: Handle, buf: &[u8]) -> Win32Result<usize> {
             extern "stdcall" fn(usize, *const u8, u32, *mut u32, usize) -> u32,
             h.0,
             buf.as_ptr(),
-            cmp::min(buf.len(), u32::MAX as usize) as u32,
+            cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             &mut n,
             0
-        )
+        ) == 0
     };
-    if r == 0 {
+    if r {
         Err(winapi::last_error())
     } else {
         Ok(n as usize)
@@ -114,9 +150,9 @@ pub fn MoveFileEx(from: impl AsRef<str>, to: impl AsRef<str>, flags: u32) -> Win
             s.as_ptr(),
             d.as_ptr(),
             flags
-        )
+        ) == 0
     };
-    if r == 0 {
+    if r {
         Err(winapi::last_error())
     } else {
         Ok(())
@@ -133,13 +169,13 @@ pub fn CopyFileEx(from: impl AsRef<str>, to: impl AsRef<str>, flags: u32) -> Win
             extern "stdcall" fn(*const u16, *const u16, unsafe extern "stdcall" fn(u64, u64, u64, u64, u32, u32, usize, usize, *mut usize) -> u32, *mut u64, *mut u32, u32) -> u32,
             s.as_ptr(),
             d.as_ptr(),
-            _copy_file_ex,
+            winapi::_copy_file_ex,
             &mut n,
             &mut 0,
             flags
-        )
+        ) == 0
     };
-    if r == 0 {
+    if r {
         Err(winapi::last_error())
     } else {
         Ok(n)
@@ -167,30 +203,23 @@ pub fn CreateProcess<T: AsRef<str>, E: AsRef<str>, M: MaybeString>(name: T, cmd:
             if inherit { 1 } else { 0 },
             f,
             e.as_ptr(),
-            if d.is_empty() { ptr::null() } else { d.as_ptr() },
+            d.as_null_or_ptr(),
             start.as_ptr(),
             &mut i
-        )
+        ) == 0
     };
-    if r == 0 {
+    if r {
         Err(winapi::last_error())
     } else {
         Ok(i)
     }
 }
 
-unsafe extern "stdcall" fn _copy_file_ex(_z: u64, _t: u64, _c: u64, n: u64, i: u32, _r: u32, _s: usize, _d: usize, d: *mut usize) -> u32 {
-    if i == 1 {
-        *(d as *mut u64) = n;
-    }
-    0
-}
-
 #[cfg(feature = "snap")]
 mod snap {
     use crate::device::winapi::loader::kernel32;
     use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle, ProcessEntry32, ThreadEntry32, Win32Result};
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
 
     #[inline]
     pub fn Thread32Next(h: impl AsHandle, e: &mut ThreadEntry32) -> Win32Result<()> {

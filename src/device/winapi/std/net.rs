@@ -15,8 +15,10 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
+use alloc::vec;
+use core::alloc::Allocator;
 use core::iter::Cloned;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use core::option::IntoIter;
@@ -24,11 +26,11 @@ use core::slice::Iter;
 use core::time::Duration;
 use core::{cmp, ptr};
 
+use crate::data::str::Fiber;
 use crate::device::winapi::{self, AddressInfo, OwnedSocket, Win32Error};
-use crate::util::stx::io::{self, Error, ErrorKind, Read, Write};
-use crate::util::stx::prelude::*;
+use crate::io::{self, Error, ErrorKind, Read, Write};
+use crate::prelude::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Shutdown {
     Read,
     Write,
@@ -62,9 +64,13 @@ struct Socket(OwnedSocket);
 impl Socket {
     #[inline]
     fn new(family: u32, socket_type: u32) -> io::Result<Socket> {
-        Ok(Socket(
-            winapi::WSASocket(family, socket_type, 0, false, false).map_err(Error::from)?,
-        ))
+        Ok(Socket(winapi::WSASocket(
+            family,
+            socket_type,
+            0,
+            false,
+            false,
+        )?))
     }
 
     #[inline]
@@ -122,7 +128,13 @@ impl Socket {
         // 0xFFFF - SOL_SOCKET
         // 0x1007 - SO_ERROR
         winapi::WSAGetSockOption::<u32>(&self.0, 0xFFFF, 0x1007)
-            .map(|r| if r == 0 { None } else { Some(Win32Error::Code(r).into()) })
+            .map(|r| {
+                if r == 0 {
+                    None
+                } else {
+                    Some(Win32Error::from_code(r).into())
+                }
+            })
             .map_err(Error::from)
     }
     #[inline]
@@ -132,9 +144,9 @@ impl Socket {
     #[inline]
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         winapi::WSAShutdownSock(&self.0, match how {
-            Shutdown::Write => 0x1, // 0x1 - SD_SEND
-            Shutdown::Read => 0x0,  // 0x0 - SD_RECEIVE
-            Shutdown::Both => 0x2,  // 0x2 - SD_BOTH
+            Shutdown::Write => 1, // 0x1 - SD_SEND
+            Shutdown::Read => 0,  // 0x0 - SD_RECEIVE
+            Shutdown::Both => 2,  // 0x2 - SD_BOTH
         })
         .map_err(Error::from)
     }
@@ -149,7 +161,15 @@ impl Socket {
     }
     #[inline]
     fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
-        winapi::WSAConnect(&self.0, addr).map_err(Error::from)
+        winapi::WSAConnect(&self.0, addr)
+            .or_else(|e| {
+                if e == Win32Error::IoPending {
+                    winapi::WSAWaitSock(&self.0, None)
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(Error::from)
     }
     #[inline]
     fn set_nodelay(&self, no_delay: bool) -> io::Result<()> {
@@ -209,7 +229,7 @@ impl Socket {
             &self.0,
             0xFFFF, // 0xFFFF - SOL_SOCKET
             kind,
-            dur.map_or(0u32, |d| cmp::min(d.as_millis(), u32::MAX as u128) as u32),
+            dur.map_or(0u32, |d| cmp::min(d.as_millis(), 0xFFFFFFFF) as u32),
         )
         .map_err(Error::from)
     }
@@ -220,7 +240,7 @@ impl Socket {
         self.set_nonblocking(false)?;
         r.or_else(|e| {
             if e == Win32Error::IoPending {
-                winapi::WSAWaitSock(&self.0, timeout)
+                winapi::WSAWaitSock(&self.0, Some(timeout))
             } else {
                 Err(e)
             }
@@ -258,17 +278,7 @@ impl UdpSocket {
                 Err(e) => l = Some(e),
             }
         }
-        Err(l.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
-    }
-    pub fn connect(addr: impl ToSocketAddrs) -> io::Result<UdpSocket> {
-        let mut l = None;
-        for a in addr.to_socket_addrs()? {
-            match UdpSocket::try_connect(&a) {
-                Ok(s) => return Ok(s),
-                Err(e) => l = Some(e),
-            }
-        }
-        Err(l.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
+        Err(l.unwrap_or_else(|| ErrorKind::AddrNotAvailable.into()))
     }
 
     #[inline]
@@ -383,6 +393,16 @@ impl UdpSocket {
         )
         .map_err(Error::from)
     }
+    pub fn connect(&self, addr: impl ToSocketAddrs) -> io::Result<()> {
+        let mut l = None;
+        for a in addr.to_socket_addrs()? {
+            match self.0.connect(&a) {
+                Ok(_) => return Ok(()),
+                Err(e) => l = Some(e),
+            }
+        }
+        Err(l.unwrap_or_else(|| ErrorKind::AddrNotAvailable.into()))
+    }
     #[inline]
     pub fn set_nonblocking(&self, non_blocking: bool) -> io::Result<()> {
         self.0.set_nonblocking(non_blocking)
@@ -447,7 +467,7 @@ impl UdpSocket {
                 Err(e) => l = Some(e),
             }
         }
-        Err(l.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
+        Err(l.unwrap_or_else(|| ErrorKind::AddrNotAvailable.into()))
     }
     #[inline]
     pub fn join_multicast_v6(&self, multi_addr: &Ipv6Addr, interface: u32) -> io::Result<()> {
@@ -504,20 +524,6 @@ impl UdpSocket {
         s.bind(addr)?;
         Ok(UdpSocket(s))
     }
-    fn try_connect(addr: &SocketAddr) -> io::Result<UdpSocket> {
-        // 0x02 - SOCK_DGRAM
-        // 0x02 - AF_INET
-        // 0x17 - AF_INET6
-        let s = Socket::new(
-            match addr {
-                SocketAddr::V4(_) => 0x2,
-                SocketAddr::V6(_) => 0x17,
-            },
-            2,
-        )?;
-        s.connect(addr)?;
-        Ok(UdpSocket(s))
-    }
 }
 impl TcpStream {
     pub fn connect(addr: impl ToSocketAddrs) -> io::Result<TcpStream> {
@@ -528,7 +534,7 @@ impl TcpStream {
                 Err(e) => l = Some(e),
             }
         }
-        Err(l.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
+        Err(l.unwrap_or_else(|| ErrorKind::AddrNotAvailable.into()))
     }
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         // 0x01 - SOCK_STREAM
@@ -563,7 +569,7 @@ impl TcpStream {
     }
     #[inline]
     pub fn try_clone(&self) -> io::Result<TcpStream> {
-        self.0.duplicate().map(|s| TcpStream(s))
+        self.0.duplicate().map(TcpStream)
     }
     #[inline]
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
@@ -650,7 +656,7 @@ impl TcpListener {
                 Err(e) => l = Some(e),
             }
         }
-        Err(l.unwrap_or_else(|| io::ErrorKind::AddrNotAvailable.into()))
+        Err(l.unwrap_or_else(|| ErrorKind::AddrNotAvailable.into()))
     }
 
     #[inline]
@@ -679,7 +685,7 @@ impl TcpListener {
     }
     #[inline]
     pub fn try_clone(&self) -> io::Result<TcpListener> {
-        self.0.duplicate().map(|s| TcpListener(s))
+        self.0.duplicate().map(TcpListener)
     }
     #[inline]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -781,6 +787,26 @@ impl Write for &TcpStream {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.send(0, buf)
+    }
+}
+
+impl Eq for Shutdown {}
+impl Copy for Shutdown {}
+impl Clone for Shutdown {
+    #[inline]
+    fn clone(&self) -> Shutdown {
+        *self
+    }
+}
+impl PartialEq for Shutdown {
+    #[inline]
+    fn eq(&self, other: &Shutdown) -> bool {
+        match (self, other) {
+            (Shutdown::Read, Shutdown::Read) => true,
+            (Shutdown::Write, Shutdown::Write) => true,
+            (Shutdown::Both, Shutdown::Both) => true,
+            _ => false,
+        }
     }
 }
 
@@ -895,6 +921,14 @@ impl ToSocketAddrs for (Ipv6Addr, u16) {
     fn to_socket_addrs(&self) -> io::Result<IntoIter<SocketAddr>> {
         let (i, p) = *self;
         SocketAddrV6::new(i, p, 0, 0).to_socket_addrs()
+    }
+}
+impl<A: Allocator + Clone + Copy> ToSocketAddrs for Fiber<A> {
+    type Iter = vec::IntoIter<SocketAddr>;
+
+    #[inline]
+    fn to_socket_addrs(&self) -> io::Result<vec::IntoIter<SocketAddr>> {
+        self.as_str().to_socket_addrs()
     }
 }
 

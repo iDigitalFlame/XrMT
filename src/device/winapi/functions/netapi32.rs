@@ -15,14 +15,13 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
-use core::ptr;
-
+use crate::data::str::MaybeString;
 use crate::device::winapi::loader::netapi32;
-use crate::device::winapi::{self, MaybeString, WCharPtr, WChars, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{self, WCharPtr, WChars, Win32Result};
+use crate::prelude::*;
 
 pub fn NetGetJoinInformation(server: impl MaybeString) -> Win32Result<(String, u8)> {
     winapi::init_netapi32();
@@ -33,7 +32,7 @@ pub fn NetGetJoinInformation(server: impl MaybeString) -> Win32Result<(String, u
         winapi::syscall!(
             *netapi32::NetGetJoinInformation,
             extern "stdcall" fn(*const u16, *mut *mut u16, *mut u32) -> u32,
-            if s.is_empty() { ptr::null() } else { s.as_ptr() },
+            s.as_null_or_ptr(),
             &mut b.as_mut_ptr(),
             &mut x
         )

@@ -15,11 +15,11 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use crate::data::blob::Blob;
 use crate::device::winapi::{self, FileTime};
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 #[repr(C)]
 pub struct RegKeyInfo {
@@ -74,12 +74,12 @@ impl Default for RegKeyInfo {
     fn default() -> RegKeyInfo {
         RegKeyInfo {
             last_write:         FileTime::default(),
-            value_count:        0,
-            subkey_count:       0,
-            max_value_len:      0,
-            max_class_len:      0,
-            max_subkey_len:     0,
-            max_value_name_len: 0,
+            value_count:        0u32,
+            subkey_count:       0u32,
+            max_value_len:      0u32,
+            max_class_len:      0u32,
+            max_subkey_len:     0u32,
+            max_value_name_len: 0u32,
         }
     }
 }
@@ -87,17 +87,17 @@ impl Default for RegKeyFullInfo {
     #[inline]
     fn default() -> RegKeyFullInfo {
         RegKeyFullInfo {
-            index:              0,
-            values:             0,
-            subkeys:            0,
-            last_write:         0,
-            class_name:         [0; 261],
-            class_offset:       0,
-            class_length:       0,
-            max_name_len:       0,
-            max_class_len:      0,
-            max_value_len:      0,
-            max_value_name_len: 0,
+            index:              0u32,
+            values:             0u32,
+            subkeys:            0u32,
+            last_write:         0u64,
+            class_name:         [0u16; 261],
+            class_offset:       0u32,
+            class_length:       0u32,
+            max_name_len:       0u32,
+            max_class_len:      0u32,
+            max_value_len:      0u32,
+            max_value_name_len: 0u32,
         }
     }
 }
@@ -106,10 +106,10 @@ impl Default for RegKeyBasicInfo {
     #[inline]
     fn default() -> RegKeyBasicInfo {
         RegKeyBasicInfo {
-            name:        [0; 256],
-            index:       0,
-            last_write:  0,
-            name_length: 0,
+            name:        [0u16; 256],
+            index:       0u32,
+            last_write:  0u64,
+            name_length: 0u32,
         }
     }
 }
@@ -138,12 +138,12 @@ impl Default for RegKeyValueFullInfo {
     #[inline]
     fn default() -> RegKeyValueFullInfo {
         RegKeyValueFullInfo {
-            name:        [0; 261],
-            index:       0,
-            value_type:  0,
-            data_offset: 0,
-            data_length: 0,
-            name_length: 0,
+            name:        [0u16; 261],
+            index:       0u32,
+            value_type:  0u32,
+            data_offset: 0u32,
+            data_length: 0u32,
+            name_length: 0u32,
         }
     }
 }

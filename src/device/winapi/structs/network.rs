@@ -15,14 +15,16 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
+use core::mem::transmute;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use core::{mem, ptr};
+use core::ptr;
 
 use crate::device::winapi::functions::SockAddr;
 use crate::device::winapi::{self, CharPtr, WCharPtr, Win32Error, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::prelude::*;
 
 #[repr(C)]
 pub struct Adapter {
@@ -146,9 +148,9 @@ impl AddressInfo {
             socktype,
             addr: ptr::null_mut(),
             next: ptr::null_mut(),
-            protocol: 0,
+            protocol: 0u32,
             canon_name: CharPtr::null(),
-            address_size: 0,
+            address_size: 0usize,
         }
     }
 }
@@ -169,7 +171,7 @@ impl Eq for OwnedSocket {}
 impl Drop for OwnedSocket {
     #[inline]
     fn drop(&mut self) {
-        let _ = winapi::WSACloseSocket(self); // IGNORE ERROR
+        ignore_error!(winapi::WSACloseSocket(self));
     }
 }
 impl PartialEq for OwnedSocket {
@@ -183,11 +185,11 @@ impl Default for SockAddr {
     #[inline]
     fn default() -> SockAddr {
         SockAddr {
-            port:   0,
-            addr4:  0,
-            addr6:  [0; 16],
-            scope:  0,
-            family: 0,
+            port:   0u16,
+            addr4:  0u32,
+            addr6:  [0u8; 16],
+            scope:  0u32,
+            family: 0u16,
         }
     }
 }
@@ -197,11 +199,11 @@ impl Default for AddressInfo {
         AddressInfo {
             addr:         ptr::null_mut(),
             next:         ptr::null_mut(),
-            flags:        0,
-            family:       0,
-            socktype:     0,
-            protocol:     0,
-            address_size: 0,
+            flags:        0u32,
+            family:       0u32,
+            socktype:     0u32,
+            protocol:     0u32,
+            address_size: 0usize,
             canon_name:   CharPtr::null(),
         }
     }
@@ -218,7 +220,7 @@ impl TryFrom<SockAddr> for SocketAddr {
 impl From<&AddressInfo> for Option<SocketAddr> {
     #[inline]
     fn from(v: &AddressInfo) -> Option<SocketAddr> {
-        unsafe { mem::transmute::<*mut SocketAddress, &SockAddr>(v.addr) }.into_outer()
+        unsafe { transmute::<*mut SocketAddress, &SockAddr>(v.addr) }.into_outer()
     }
 }
 
@@ -256,7 +258,7 @@ impl<'a> Iterator for UnicastIter<'a> {
         self.cur
     }
 }
-impl<'a> Iterator for AddressIter<'a> {
+impl<'a> Iterator for AddressIter<'_> {
     type Item = SocketAddr;
 
     #[inline]
@@ -281,12 +283,12 @@ impl<'a> Iterator for AdapterIter<'a> {
     }
 }
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::OwnedSocket;
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::OwnedSocket;
+    use crate::prelude::*;
 
     impl Debug for OwnedSocket {
         #[inline]

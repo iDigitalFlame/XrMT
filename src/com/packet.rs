@@ -16,46 +16,68 @@
 
 #![no_implicit_prelude]
 
-use core::cmp;
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 use core::error::Error;
-use core::fmt::{Arguments, Debug, Display};
+use core::fmt::{Arguments, Debug, Display, Formatter};
 use core::ops::{Deref, DerefMut};
+use core::{cmp, fmt};
 
 use crate::com::Flag;
 use crate::data::{self, Chunk, Readable, Reader, Writable, Writer};
 use crate::device::ID;
-use crate::util::stx::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
-use crate::util::stx::prelude::*;
+use crate::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use crate::prelude::*;
 
-pub struct Packet {
-    pub id:     u8,
-    pub job:    u16,
-    pub tags:   Vec<u32>,
-    pub flags:  Flag,
-    pub device: ID,
-    data:       Chunk,
-}
 pub enum PacketAddError {
     Mismatch,
     LimitError,
+    InvalidCount,
+}
+
+pub struct Packet<A: Allocator = Global> {
+    pub id:          u8,
+    pub job:         u16,
+    pub tags:        Vec<u32, A>,
+    pub flags:       Flag,
+    pub device:      ID,
+    pub(crate) data: Chunk<A>,
 }
 
 impl Packet {
     pub const MAX_TAGS: usize = 2 << 14;
-    pub const HEADER_SIZE: usize = 46;
+    pub const HEADER_SIZE: usize = 46usize;
 
     #[inline]
     pub fn new() -> Packet {
-        Packet {
-            id:     0,
-            job:    0,
-            tags:   Vec::new(),
-            data:   Chunk::new(),
-            flags:  Flag::new(),
-            device: ID::default(),
-        }
+        Packet::new_in(Global)
     }
-
+    #[inline]
+    pub fn new_dev(dev: ID) -> Packet {
+        Packet::new_id_in(0, dev, Global)
+    }
+    #[inline]
+    pub fn new_id(id: u8, dev: ID) -> Packet {
+        Packet::new_id_in(id, dev, Global)
+    }
+    #[inline]
+    pub fn new_job(id: u8, job: u16) -> Packet {
+        Packet::new_job_in(id, job, Global)
+    }
+    #[inline]
+    pub fn new_with(id: u8, job: u16, dev: ID) -> Packet {
+        Packet::new_with_in(id, job, dev, Global)
+    }
+    #[inline]
+    pub fn from_reader(r: &mut impl Read) -> io::Result<Packet> {
+        Packet::from_reader_in(r, Global)
+    }
+    #[inline]
+    pub fn from_stream(r: &mut impl Reader) -> io::Result<Packet> {
+        Packet::from_stream_in(r, Global)
+    }
+}
+impl<A: Allocator> Packet<A> {
     #[inline]
     pub fn size(&self) -> usize {
         if self.data.is_empty() {
@@ -71,11 +93,21 @@ impl Packet {
         }
     }
     #[inline]
-    pub fn belongs(&self, other: &Packet) -> bool {
+    pub fn belongs(&self, other: &Packet<A>) -> bool {
         self.flags.has(Flag::FRAG) && other.flags.has(Flag::FRAG) && self.id == other.id && self.job == other.job && self.flags.group() == other.flags.group()
     }
     #[inline]
-    pub fn add(&mut self, new: Packet) -> Result<(), PacketAddError> {
+    pub fn write_packet(&self, w: &mut impl Write) -> io::Result<()> {
+        self.write_header(w)?;
+        self.write_body(w)
+    }
+    #[inline]
+    pub fn read_packet(&mut self, r: &mut impl Read) -> io::Result<()> {
+        let n = self.read_header(r)?;
+        self.read_body(n, r)
+    }
+    #[inline]
+    pub fn add(&mut self, new: Packet<A>) -> Result<(), PacketAddError> {
         if new.data.is_empty() {
             return Ok(());
         }
@@ -88,20 +120,29 @@ impl Packet {
         self.flags.0 |= (new.flags.0 as u16) as u64;
         Ok(())
     }
+
     #[inline]
-    pub fn write_packet(&self, w: &mut impl Write) -> io::Result<()> {
-        self.write_header(w)?;
-        self.write_body(w)
+    pub fn with_job(mut self, job: u16) -> Packet<A> {
+        self.job = job;
+        self
     }
     #[inline]
-    pub fn read_packet(&mut self, r: &mut impl Read) -> io::Result<()> {
-        let n = self.read_header(r)?;
-        self.read_body(n, r)
+    pub fn with_tags(mut self, tags: &[u32]) -> Packet<A> {
+        if tags.len() > 0 {
+            self.tags.extend_from_slice(tags);
+            self.tags.dedup();
+        }
+        self
+    }
+    #[inline]
+    pub fn with_flags(mut self, flags: Flag) -> Packet<A> {
+        self.flags = flags;
+        self
     }
 
     fn write_body(&self, w: &mut impl Write) -> io::Result<()> {
         if !self.tags.is_empty() {
-            crate::bugtrack!("com::Packet.write_body(): p.tags.len()={}", self.tags.len());
+            bugtrack!("com::Packet.write_body(): p.tags.len()={}", self.tags.len());
             for (i, t) in self.tags.iter().enumerate() {
                 if i > Packet::MAX_TAGS {
                     break;
@@ -119,7 +160,7 @@ impl Packet {
         if n != self.data.size() {
             return Err(ErrorKind::WriteZero.into());
         }
-        crate::bugtrack!(
+        bugtrack!(
             "com::Packet.write_body(): p.Chunk.Size()={}, n={n}",
             self.data.size()
         );
@@ -128,7 +169,7 @@ impl Packet {
     fn write_header(&self, w: &mut impl Write) -> io::Result<()> {
         let t = self.tags.len();
         if t > Packet::MAX_TAGS {
-            return Err(io::ErrorKind::TooManyLinks.into());
+            return Err(ErrorKind::TooManyLinks.into());
         }
         self.device.write(w)?;
         let mut b = [0u8; 22];
@@ -164,7 +205,7 @@ impl Packet {
         };
         data::write_full(w, &b[0..14])?;
         data::write_full(w, &b[14..14 + c])?;
-        crate::bugtrack!(
+        bugtrack!(
             "com::Packet.write_header(): p.id={}, p.len={}, n={}",
             self.id,
             self.data.len(),
@@ -176,7 +217,7 @@ impl Packet {
         self.device.read(r)?;
         let mut b = [0u8; 14];
         data::read_full(r, &mut b)?;
-        crate::bugtrack!("com::Packet.readHeader(): b={:?}", b[0..14]);
+        bugtrack!("com::Packet.readHeader(): b={:?}", &b[0..14]);
         self.id = b[0];
         // SAFETY: All these are safe as we own the buffer and it is larger than
         // the sizes requested, so we'll be fine.
@@ -190,32 +231,32 @@ impl Packet {
             0 => 0usize,
             1 => {
                 data::read_full(r, &mut b[0..1])?;
-                crate::bugtrack!("com::Packet.read_header(): 1, n=1, b=[{:?}]", b[0]);
+                bugtrack!("com::Packet.read_header(): 1, n=1, b=[{:?}]", b[0]);
                 b[0] as usize
             },
             3 => {
                 data::read_full(r, &mut b[0..2])?;
-                crate::bugtrack!("com::Packet.read_header(): 3, n=2, b={:?}", b[0..2]);
+                bugtrack!("com::Packet.read_header(): 3, n=2, b={:?}", &b[0..2]);
                 u16::from_be_bytes(unsafe { *(b[0..2].as_ptr() as *const [u8; 2]) }) as usize
             },
             5 => {
                 data::read_full(r, &mut b[0..4])?;
-                crate::bugtrack!("com::Packet.read_header(): 5, n=4, b={:?}", b[0..4]);
+                bugtrack!("com::Packet.read_header(): 5, n=4, b={:?}", &b[0..4]);
                 u32::from_be_bytes(unsafe { *(b[0..4].as_ptr() as *const [u8; 4]) }) as usize
             },
             7 => {
                 data::read_full(r, &mut b[0..8])?;
-                crate::bugtrack!("com::Packet.read_header(): 7, n=8, b={:?}", b[0..8]);
+                bugtrack!("com::Packet.read_header(): 7, n=8, b={:?}", &b[0..8]);
                 u64::from_be_bytes(unsafe { *(b[0..8].as_ptr() as *const [u8; 8]) }) as usize
             },
             _ => return Err(ErrorKind::InvalidData.into()),
         };
-        crate::bugtrack!("com::Packet.read_header(): p.ID={}, p.len={n}", self.id);
+        bugtrack!("com::Packet.read_header(): p.ID={}, p.len={n}", self.id);
         Ok(n)
     }
     fn read_body(&mut self, len: usize, r: &mut impl Read) -> io::Result<()> {
         if !self.tags.is_empty() {
-            crate::bugtrack!("com::Packet.read_body(): p.tags.len()={}", self.tags.len());
+            bugtrack!("com::Packet.read_body(): p.tags.len()={}", self.tags.len());
             let mut b = [0u8; 4];
             for i in 0..self.tags.len() {
                 data::read_full(r, &mut b)?;
@@ -226,7 +267,7 @@ impl Packet {
                 self.tags[i] = v;
             }
         }
-        crate::bugtrack!("com::Packet.read_body(): p.len={len}");
+        bugtrack!("com::Packet.read_body(): p.len={len}");
         if len == 0 {
             return Ok(());
         }
@@ -240,11 +281,73 @@ impl Packet {
             }
         }
         self.data.limit = 0;
-        crate::bugtrack!("com::Packet.read_body(): p.len={len} t={n}");
+        bugtrack!("com::Packet.read_body(): p.len={len} t={n}");
         if n < len {
             return Err(ErrorKind::UnexpectedEof.into());
         }
         Ok(())
+    }
+}
+impl<A: Allocator + Clone> Packet<A> {
+    #[inline]
+    pub fn new_in(alloc: A) -> Packet<A> {
+        Packet {
+            id:     0u8,
+            job:    0u16,
+            tags:   Vec::new_in(alloc.clone()),
+            data:   Chunk::new_in(alloc),
+            flags:  Flag::new(),
+            device: ID::new(),
+        }
+    }
+    #[inline]
+    pub fn new_dev_in(dev: ID, alloc: A) -> Packet<A> {
+        Packet::new_id_in(0, dev, alloc)
+    }
+    #[inline]
+    pub fn new_id_in(id: u8, dev: ID, alloc: A) -> Packet<A> {
+        Packet {
+            id,
+            job: 0u16,
+            tags: Vec::new_in(alloc.clone()),
+            data: Chunk::new_in(alloc),
+            flags: Flag::new(),
+            device: dev,
+        }
+    }
+    #[inline]
+    pub fn new_job_in(id: u8, job: u16, alloc: A) -> Packet<A> {
+        Packet {
+            id,
+            job,
+            tags: Vec::new_in(alloc.clone()),
+            data: Chunk::new_in(alloc),
+            flags: Flag::new(),
+            device: ID::new(),
+        }
+    }
+    #[inline]
+    pub fn new_with_in(id: u8, job: u16, dev: ID, alloc: A) -> Packet<A> {
+        Packet {
+            id,
+            job,
+            tags: Vec::new_in(alloc.clone()),
+            data: Chunk::new_in(alloc),
+            flags: Flag::new(),
+            device: dev,
+        }
+    }
+    #[inline]
+    pub fn from_reader_in(r: &mut impl Read, alloc: A) -> io::Result<Packet<A>> {
+        let mut n = Packet::new_in(alloc);
+        n.read_packet(r)?;
+        Ok(n)
+    }
+    #[inline]
+    pub fn from_stream_in(r: &mut impl Reader, alloc: A) -> io::Result<Packet<A>> {
+        let mut n = Packet::new_in(alloc);
+        n.read_stream(r)?;
+        Ok(n)
     }
 }
 
@@ -260,24 +363,30 @@ impl Error for PacketAddError {
 }
 impl Debug for PacketAddError {
     #[inline]
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&ErrorKind::InvalidInput.to_string())
     }
 }
 impl Display for PacketAddError {
     #[inline]
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&ErrorKind::InvalidInput.to_string())
     }
 }
 
-impl Read for Packet {
+impl Default for Packet {
+    #[inline]
+    fn default() -> Packet {
+        Packet::new()
+    }
+}
+impl<A: Allocator> Read for Packet<A> {
     #[inline]
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
         self.data.read(b)
     }
 }
-impl Seek for Packet {
+impl<A: Allocator> Seek for Packet<A> {
     #[inline]
     fn stream_len(&mut self) -> io::Result<u64> {
         self.data.stream_len()
@@ -291,7 +400,7 @@ impl Seek for Packet {
         self.data.seek(pos)
     }
 }
-impl Write for Packet {
+impl<A: Allocator> Write for Packet<A> {
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -309,42 +418,23 @@ impl Write for Packet {
         self.data.write_fmt(fmt)
     }
 }
-impl Deref for Packet {
-    type Target = Chunk;
+impl<A: Allocator> Deref for Packet<A> {
+    type Target = Chunk<A>;
 
     #[inline]
-    fn deref(&self) -> &Chunk {
+    fn deref(&self) -> &Chunk<A> {
         &self.data
     }
 }
-impl Clone for Packet {
+impl<A: Allocator> Reader for Packet<A> {}
+impl<A: Allocator> Writer for Packet<A> {}
+impl<A: Allocator> DerefMut for Packet<A> {
     #[inline]
-    fn clone(&self) -> Packet {
-        Packet {
-            id:     self.id,
-            job:    self.job,
-            data:   self.data.clone(),
-            tags:   self.tags.clone(),
-            flags:  self.flags,
-            device: self.device,
-        }
-    }
-}
-impl Reader for Packet {}
-impl Writer for Packet {}
-impl Default for Packet {
-    #[inline]
-    fn default() -> Packet {
-        Packet::new()
-    }
-}
-impl DerefMut for Packet {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Chunk {
+    fn deref_mut(&mut self) -> &mut Chunk<A> {
         &mut self.data
     }
 }
-impl Readable for Packet {
+impl<A: Allocator> Readable for Packet<A> {
     fn read_stream(&mut self, r: &mut impl Reader) -> io::Result<()> {
         r.read_into_u8(&mut self.id)?;
         r.read_into_u16(&mut self.job)?;
@@ -364,7 +454,7 @@ impl Readable for Packet {
         self.data.read_stream(r)
     }
 }
-impl Writable for Packet {
+impl<A: Allocator> Writable for Packet<A> {
     fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
         w.write_u8(self.id)?;
         w.write_u16(self.job)?;
@@ -380,28 +470,42 @@ impl Writable for Packet {
         self.data.write_stream(w)
     }
 }
-impl AsRef<[u8]> for Packet {
+impl<A: Allocator> AsRef<[u8]> for Packet<A> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.data.as_ref()
     }
 }
+impl<A: Allocator + Copy + Clone> Clone for Packet<A> {
+    #[inline]
+    fn clone(&self) -> Packet<A> {
+        Packet {
+            id:     self.id,
+            job:    self.job,
+            data:   self.data.clone(),
+            tags:   self.tags.clone(),
+            flags:  self.flags,
+            device: self.device,
+        }
+    }
+}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
+    use core::alloc::Allocator;
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex, Write};
 
     use crate::com::Packet;
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
     use crate::util::{ToStr, ToStrHex};
 
-    impl Debug for Packet {
+    impl<A: Allocator> Debug for Packet<A> {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             Display::fmt(self, f)
         }
     }
-    impl Display for Packet {
+    impl<A: Allocator> Display for Packet<A> {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut b = [0u8; 21];
             match 0 {
@@ -507,14 +611,14 @@ mod display {
             }
         }
     }
-    impl UpperHex for Packet {
+    impl<A: Allocator> UpperHex for Packet<A> {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut b = [0u8; 20];
             f.write_str(self.id.into_hex_str(&mut b))
         }
     }
-    impl LowerHex for Packet {
+    impl<A: Allocator> LowerHex for Packet<A> {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             UpperHex::fmt(self, f)

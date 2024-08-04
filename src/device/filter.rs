@@ -16,22 +16,25 @@
 
 #![no_implicit_prelude]
 
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 use core::error::Error;
 use core::fmt::{self, Debug, Display, Formatter};
 
-use crate::data::{self, Readable, Reader, Writable, Writer};
-use crate::util::stx::io::{self, ErrorKind};
-use crate::util::stx::prelude::*;
+use crate::data::str::Fiber;
+use crate::data::{read_fiber_vec, write_fiber_vec, Readable, Reader, Writable, Writer};
+use crate::io::{self, ErrorKind};
+use crate::prelude::*;
 
 pub enum FilterError {
     NoProcessFound,
+    OsError(i32),
     FindError(String),
 }
 
-#[cfg_attr(not(feature = "implant"), derive(Debug))]
-pub struct Filter {
-    pub exclude:  Vec<String>,
-    pub include:  Vec<String>,
+pub struct Filter<A: Allocator = Global> {
+    pub exclude:  Vec<Fiber<A>, A>,
+    pub include:  Vec<Fiber<A>, A>,
     pub pid:      u32,
     pub fallback: bool,
     pub session:  u8,
@@ -39,75 +42,80 @@ pub struct Filter {
 }
 
 pub trait Boolean {
-    fn as_boolean(&self) -> u8;
-}
-pub trait MaybeFilter {
-    fn into_filter(self) -> Option<Filter>;
+    fn as_bool(&self) -> u8;
 }
 pub trait ToFilter: Into<Filter> {}
+pub trait MaybeFilter<A: Allocator = Global> {
+    fn into_filter(self) -> Option<Filter<A>>;
+}
 
+#[cfg(target_family = "windows")]
+pub type FilterHandle = crate::device::winapi::OwnedHandle;
+#[cfg(not(target_family = "windows"))]
+pub type FilterHandle = usize;
+
+pub type FilterResult<T> = Result<T, FilterError>;
 pub type FilterFunc = Option<fn(u32, bool, &str, usize) -> bool>;
 
 impl Filter {
-    pub const TRUE: u8 = 2;
-    pub const FALSE: u8 = 1;
-    pub const EMPTY: u8 = 0;
+    pub const TRUE: u8 = 2u8;
+    pub const FALSE: u8 = 1u8;
+    pub const EMPTY: u8 = 0u8;
 
     #[inline]
     pub const fn empty() -> Filter {
-        Filter {
-            pid:      0,
-            exclude:  Vec::new(),
-            include:  Vec::new(),
-            session:  Filter::EMPTY,
-            fallback: false,
-            elevated: Filter::EMPTY,
-        }
+        Filter::with_fallback(false)
     }
     #[inline]
     pub const fn with_fallback(fallback: bool) -> Filter {
         Filter {
-            fallback,
-            pid: 0,
+            pid: 0u32,
             exclude: Vec::new(),
             include: Vec::new(),
             session: Filter::EMPTY,
             elevated: Filter::EMPTY,
+            fallback,
         }
     }
 
     #[inline]
     pub fn with_target(proc: impl AsRef<str>) -> Filter {
-        let mut f = Filter {
-            pid:      0,
-            exclude:  Vec::new(),
-            include:  Vec::new(),
-            session:  Filter::EMPTY,
-            fallback: false,
-            elevated: Filter::EMPTY,
-        };
-        f.include.push(proc.as_ref().to_string());
+        let mut f = Filter::with_fallback(false);
+        f.include.push(proc.as_ref().into());
         f
     }
     #[inline]
-    pub fn with_include(include: Vec<String>) -> Filter {
-        include.into()
+    pub fn with_include(include: Vec<impl AsRef<str>>) -> Filter {
+        Filter {
+            pid:      0u32,
+            exclude:  Vec::new(),
+            include:  Fiber::convert_vec(include),
+            session:  Filter::EMPTY,
+            elevated: Filter::EMPTY,
+            fallback: false,
+        }
     }
     #[inline]
-    pub fn with_exclude(exclude: Vec<String>) -> Filter {
+    pub fn with_exclude(exclude: Vec<impl AsRef<str>>) -> Filter {
         Filter {
-            pid:      0,
-            exclude:  exclude.clone(),
+            pid:      0u32,
+            exclude:  Fiber::convert_vec(exclude),
             include:  Vec::new(),
             session:  Filter::EMPTY,
-            fallback: false,
             elevated: Filter::EMPTY,
+            fallback: false,
         }
     }
 
     #[inline]
+    pub fn from_reader(r: &mut impl Reader) -> io::Result<Option<Filter>> {
+        Filter::from_reader_in(r, Global)
+    }
+}
+impl<A: Allocator> Filter<A> {
+    #[inline]
     pub fn clear(&mut self) {
-        self.pid = 0;
+        self.pid = 0u32;
         self.session = Filter::EMPTY;
         self.elevated = Filter::EMPTY;
         self.include.clear();
@@ -118,40 +126,98 @@ impl Filter {
         self.pid == 0 && self.session == Filter::EMPTY && self.elevated == Filter::EMPTY && self.include.is_empty() && self.exclude.is_empty()
     }
     #[inline]
-    pub fn pid(&mut self, pid: u32) -> &mut Filter {
+    pub fn pid(&mut self, pid: u32) -> &mut Filter<A> {
         self.pid = pid;
         self
     }
     #[inline]
-    pub fn fallback(&mut self, fallback: bool) -> &mut Filter {
+    pub fn fallback(&mut self, fallback: bool) -> &mut Filter<A> {
         self.fallback = fallback;
         self
     }
     #[inline]
-    pub fn include(&mut self, proc: impl AsRef<str>) -> &mut Filter {
-        self.include.push(proc.as_ref().to_string());
+    pub fn session(&mut self, session: impl Boolean) -> &mut Filter<A> {
+        self.session = session.as_bool();
         self
     }
     #[inline]
-    pub fn exclude(&mut self, proc: impl AsRef<str>) -> &mut Filter {
-        self.exclude.push(proc.as_ref().to_string());
+    pub fn elevated(&mut self, elevated: impl Boolean) -> &mut Filter<A> {
+        self.elevated = elevated.as_bool();
+        self
+    }
+}
+impl<A: Allocator + Clone> Filter<A> {
+    #[inline]
+    pub fn empty_in(alloc: A) -> Filter<A> {
+        Filter::with_fallback_in(false, alloc)
+    }
+    #[inline]
+    pub fn with_fallback_in(fallback: bool, alloc: A) -> Filter<A> {
+        Filter {
+            pid: 0u32,
+            exclude: Vec::new_in(alloc.clone()),
+            include: Vec::new_in(alloc),
+            session: Filter::EMPTY,
+            elevated: Filter::EMPTY,
+            fallback,
+        }
+    }
+    #[inline]
+    pub fn with_target_in(proc: impl AsRef<str>, alloc: A) -> Filter<A> {
+        let mut f = Filter::with_fallback_in(false, alloc.clone());
+        f.include.push(proc.as_ref().into_alloc(alloc.clone()));
+        f
+    }
+    #[inline]
+    pub fn with_include_in<B: Allocator>(include: Vec<impl AsRef<str>, B>, alloc: A) -> Filter<A> {
+        Filter {
+            pid:      0u32,
+            exclude:  Vec::new_in(alloc.clone()),
+            include:  Fiber::convert_vec_in(include, alloc),
+            session:  Filter::EMPTY,
+            fallback: false,
+            elevated: Filter::EMPTY,
+        }
+    }
+    #[inline]
+    pub fn with_exclude_in<B: Allocator>(exclude: Vec<impl AsRef<str>, B>, alloc: A) -> Filter<A> {
+        Filter {
+            pid:      0u32,
+            exclude:  Fiber::convert_vec_in(exclude, alloc.clone()),
+            include:  Vec::new_in(alloc),
+            session:  Filter::EMPTY,
+            fallback: false,
+            elevated: Filter::EMPTY,
+        }
+    }
+
+    #[inline]
+    pub fn from_reader_in(r: &mut impl Reader, alloc: A) -> io::Result<Option<Filter<A>>> {
+        if !r.read_bool()? {
+            return Ok(None);
+        }
+        let mut f = Filter::empty_in(alloc);
+        f.read_stream(r)?;
+        Ok(Some(f))
+    }
+
+    #[inline]
+    pub fn include(&mut self, proc: impl AsRef<str>) -> &mut Filter<A> {
+        self.include
+            .push(proc.as_ref().into_alloc(self.include.allocator().clone()));
         self
     }
     #[inline]
-    pub fn session(&mut self, session: impl Boolean) -> &mut Filter {
-        self.session = session.as_boolean();
-        self
-    }
-    #[inline]
-    pub fn elevated(&mut self, elevated: impl Boolean) -> &mut Filter {
-        self.elevated = elevated.as_boolean();
+    pub fn exclude(&mut self, proc: impl AsRef<str>) -> &mut Filter<A> {
+        self.exclude
+            .push(proc.as_ref().into_alloc(self.exclude.allocator().clone()));
         self
     }
 }
 
 impl Boolean for i8 {
     #[inline]
-    fn as_boolean(&self) -> u8 {
+    fn as_bool(&self) -> u8 {
         match self {
             0 => Filter::EMPTY,
             _ if *self < 0 => Filter::FALSE,
@@ -161,7 +227,7 @@ impl Boolean for i8 {
 }
 impl Boolean for u8 {
     #[inline]
-    fn as_boolean(&self) -> u8 {
+    fn as_bool(&self) -> u8 {
         if *self > Filter::TRUE {
             Filter::TRUE
         } else {
@@ -171,7 +237,7 @@ impl Boolean for u8 {
 }
 impl Boolean for bool {
     #[inline]
-    fn as_boolean(&self) -> u8 {
+    fn as_bool(&self) -> u8 {
         if *self {
             Filter::TRUE
         } else {
@@ -181,30 +247,41 @@ impl Boolean for bool {
 }
 impl Boolean for Option<u8> {
     #[inline]
-    fn as_boolean(&self) -> u8 {
-        self.map_or(Filter::EMPTY, |v| {
-            if v > Filter::TRUE {
-                Filter::TRUE
-            } else {
-                v
-            }
-        })
+    fn as_bool(&self) -> u8 {
+        self.map_or(Filter::EMPTY, |v| v.into())
     }
 }
 impl Boolean for Option<bool> {
     #[inline]
-    fn as_boolean(&self) -> u8 {
-        self.map_or(
-            Filter::EMPTY,
-            |v| if v { Filter::TRUE } else { Filter::FALSE },
-        )
+    fn as_bool(&self) -> u8 {
+        self.map_or(Filter::EMPTY, |v| v.into())
     }
 }
 
-impl Eq for Filter {}
-impl Clone for Filter {
+impl Default for Filter {
     #[inline]
-    fn clone(&self) -> Filter {
+    fn default() -> Filter {
+        Filter::empty()
+    }
+}
+impl<A: Allocator + Eq> Eq for Filter<A> {}
+impl<A: Allocator> Writable for Filter<A> {
+    fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
+        if self.is_empty() {
+            return w.write_bool(false);
+        }
+        w.write_bool(true)?;
+        w.write_u32(self.pid)?;
+        w.write_bool(self.fallback)?;
+        w.write_u8(self.session)?;
+        w.write_u8(self.elevated)?;
+        write_fiber_vec(w, &self.exclude)?;
+        write_fiber_vec(w, &self.include)
+    }
+}
+impl<A: Allocator + Clone> Clone for Filter<A> {
+    #[inline]
+    fn clone(&self) -> Filter<A> {
         Filter {
             pid:      self.pid,
             session:  self.session,
@@ -215,27 +292,8 @@ impl Clone for Filter {
         }
     }
 }
-impl Default for Filter {
+impl<A: Allocator + Clone> Readable for Filter<A> {
     #[inline]
-    fn default() -> Filter {
-        Filter::empty()
-    }
-}
-impl Writable for Filter {
-    fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
-        if self.is_empty() {
-            return w.write_bool(false);
-        }
-        w.write_bool(true)?;
-        w.write_u32(self.pid)?;
-        w.write_bool(self.fallback)?;
-        w.write_u8(self.session)?;
-        w.write_u8(self.elevated)?;
-        data::write_str_vec(w, &self.exclude)?;
-        data::write_str_vec(w, &self.include)
-    }
-}
-impl Readable for Filter {
     fn read_stream(&mut self, r: &mut impl Reader) -> io::Result<()> {
         if !r.read_bool()? {
             return Ok(());
@@ -244,13 +302,13 @@ impl Readable for Filter {
         r.read_into_bool(&mut self.fallback)?;
         r.read_into_u8(&mut self.session)?;
         r.read_into_u8(&mut self.elevated)?;
-        data::read_str_vec(r, &mut self.exclude)?;
-        data::read_str_vec(r, &mut self.include)
+        read_fiber_vec(r, &mut self.exclude)?;
+        read_fiber_vec(r, &mut self.include)
     }
 }
-impl PartialEq for Filter {
+impl<A: Allocator + PartialEq> PartialEq for Filter<A> {
     #[inline]
-    fn eq(&self, other: &Filter) -> bool {
+    fn eq(&self, other: &Filter<A>) -> bool {
         self.fallback == other.fallback && self.pid == other.pid && self.session == other.session && self.elevated == other.elevated && self.exclude == other.exclude && self.include == other.include
     }
 }
@@ -267,45 +325,38 @@ impl MaybeFilter for String {
         Some(self.into())
     }
 }
-impl MaybeFilter for &Filter {
+impl<A: Allocator + Clone> MaybeFilter<A> for Filter<A> {
     #[inline]
-    fn into_filter(self) -> Option<Filter> {
+    fn into_filter(self) -> Option<Filter<A>> {
+        Some(self)
+    }
+}
+impl<A: Allocator + Clone> MaybeFilter<A> for &Filter<A> {
+    #[inline]
+    fn into_filter(self) -> Option<Filter<A>> {
         Some(self.clone())
     }
 }
-impl MaybeFilter for &mut Filter {
+impl<A: Allocator + Clone> MaybeFilter<A> for &mut Filter<A> {
     #[inline]
-    fn into_filter(self) -> Option<Filter> {
+    fn into_filter(self) -> Option<Filter<A>> {
         Some(self.clone())
     }
 }
 
-impl Writable for Option<Filter> {
+impl MaybeFilter for Option<Filter> {
+    #[inline]
+    fn into_filter(self) -> Option<Filter> {
+        self
+    }
+}
+impl<A: Allocator> Writable for Option<Filter<A>> {
     #[inline]
     fn write_stream(&self, w: &mut impl Writer) -> io::Result<()> {
         match self {
             Some(f) => f.write_stream(w),
             None => w.write_bool(false),
         }
-    }
-}
-impl Readable for Option<Filter> {
-    #[inline]
-    fn read_stream(&mut self, r: &mut impl Reader) -> io::Result<()> {
-        if !r.read_bool()? {
-            *self = None;
-            return Ok(());
-        }
-        let mut f = Filter::empty();
-        f.read_stream(r)?;
-        *self = Some(f);
-        Ok(())
-    }
-}
-impl MaybeFilter for Option<Filter> {
-    #[inline]
-    fn into_filter(self) -> Option<Filter> {
-        self
     }
 }
 
@@ -330,11 +381,8 @@ impl Display for FilterError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             FilterError::FindError(v) => f.write_str(v),
-            FilterError::NoProcessFound => f.write_str(if cfg!(feature = "implant") {
-                "0x404"
-            } else {
-                "no process found"
-            }),
+            FilterError::NoProcessFound => Display::fmt(&ErrorKind::NotFound, f),
+            FilterError::OsError(c) => Display::fmt(&io::Error::from_raw_os_error(*c), f),
         }
     }
 }
@@ -349,26 +397,36 @@ impl<T: ToFilter> MaybeFilter for T {
 impl From<&str> for Filter {
     #[inline]
     fn from(v: &str) -> Filter {
-        vec![v.to_string()].into()
+        let mut r = Filter::empty();
+        r.include.push(v.into());
+        r
     }
 }
 impl From<String> for Filter {
     #[inline]
     fn from(v: String) -> Filter {
-        vec![v].into()
+        v.as_str().into()
     }
 }
-impl From<Vec<String>> for Filter {
+impl<A: Allocator + Clone> From<Fiber<A>> for Filter<A> {
     #[inline]
-    fn from(v: Vec<String>) -> Filter {
-        Filter {
-            pid:      0,
-            exclude:  Vec::new(),
-            include:  v,
-            session:  Filter::EMPTY,
-            fallback: false,
-            elevated: Filter::EMPTY,
-        }
+    fn from(v: Fiber<A>) -> Filter<A> {
+        let mut r = Filter::empty_in(v.allocator().clone());
+        r.include.push(v);
+        r
+    }
+}
+impl<A: Allocator + Clone> From<Vec<String, A>> for Filter<A> {
+    #[inline]
+    fn from(v: Vec<String, A>) -> Filter<A> {
+        let a = v.allocator().clone();
+        Filter::with_include_in(v, a)
+    }
+}
+impl<A: Allocator + Clone> AllocFrom<Vec<String>, A> for Filter<A> {
+    #[inline]
+    fn from_alloc(v: Vec<String>, alloc: A) -> Filter<A> {
+        Filter::with_include_in(v, alloc)
     }
 }
 
@@ -377,14 +435,36 @@ impl From<FilterError> for io::Error {
     fn from(v: FilterError) -> io::Error {
         match v {
             FilterError::NoProcessFound => ErrorKind::NotFound.into(),
-            FilterError::FindError(m) => io::Error::new(io::ErrorKind::Other, m),
+            FilterError::OsError(c) => io::Error::from_raw_os_error(c),
+            FilterError::FindError(m) => io::Error::new(ErrorKind::Other, m),
         }
     }
 }
 
-#[cfg(unix)]
-#[path = "filter/unix.rs"]
-mod inner;
-#[cfg(windows)]
+#[cfg(target_family = "windows")]
 #[path = "filter/windows.rs"]
 mod inner;
+#[cfg(not(target_family = "windows"))]
+#[path = "filter/unix.rs"]
+mod inner;
+
+#[cfg(not(feature = "strip"))]
+mod display {
+    use core::fmt::{self, Debug, Formatter};
+
+    use crate::prelude::*;
+    use crate::process::filter::Filter;
+
+    impl Debug for Filter {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Filter")
+                .field("exclude", &self.exclude)
+                .field("include", &self.include)
+                .field("pid", &self.pid)
+                .field("fallback", &self.fallback)
+                .field("session", &self.session)
+                .field("elevated", &self.elevated)
+                .finish()
+        }
+    }
+}

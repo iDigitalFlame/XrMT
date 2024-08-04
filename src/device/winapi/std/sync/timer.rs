@@ -15,14 +15,15 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::time::Duration;
 
 use crate::data::time::Time;
 use crate::device::winapi::{self, AsHandle, Handle, OwnedHandle};
-use crate::util::stx::io::{self, Error, ErrorKind};
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::io::{self, Error, ErrorKind};
+use crate::prelude::*;
 
 pub struct Timer(OwnedHandle);
 pub struct TimeIntoIter(Timer);
@@ -31,28 +32,30 @@ pub struct TimeIter<'a>(&'a Timer);
 impl Timer {
     #[inline]
     pub fn new() -> io::Result<Timer> {
-        Ok(Timer(
-            winapi::CreateWaitableTimer(None, false, false, None).map_err(Error::from)?,
-        ))
+        Ok(Timer(winapi::CreateWaitableTimer(
+            None, false, false, None,
+        )?))
     }
     #[inline]
     pub fn open(n: impl AsRef<str>) -> io::Result<Timer> {
         Ok(Timer(
             // 0x1F0003 - FULL_CONTROL
-            winapi::OpenWaitableTimer(0x1F0003, false, n.as_ref()).map_err(Error::from)?,
+            winapi::OpenWaitableTimer(0x1F0003, false, n.as_ref())?,
         ))
     }
     #[inline]
     pub fn named(n: impl AsRef<str>) -> io::Result<Timer> {
-        Ok(Timer(
-            winapi::CreateWaitableTimer(None, false, false, n.as_ref()).map_err(Error::from)?,
-        ))
+        Ok(Timer(winapi::CreateWaitableTimer(
+            None,
+            false,
+            false,
+            n.as_ref(),
+        )?))
     }
 
     #[inline]
     pub fn wait(&self) {
-        // IGNORE ERROR
-        let _ = winapi::WaitForSingleAsHandle(self, -1, false);
+        ignore_error!(winapi::WaitForSingleObject(self, -1, false));
     }
     #[inline]
     pub fn enabled(&self) -> bool {
@@ -84,7 +87,7 @@ impl Timer {
     }
     #[inline]
     pub fn wait_alert_for(&self, alertable: bool, d: Duration) -> io::Result<()> {
-        winapi::WaitForSingleAsHandle(self, d.as_micros() as i32, alertable)
+        winapi::WaitForSingleObject(self, d.as_micros() as i32, alertable)
             .map_err(Error::from)
             .and_then(|v| match v {
                 0xC0 => Err(ErrorKind::Interrupted.into()), // STATUS_USER_APC
@@ -101,8 +104,7 @@ impl Timer {
             None,
             None,
             false,
-        )
-        .map_err(Error::from)?;
+        )?;
         Ok(())
     }
 }
@@ -129,7 +131,7 @@ impl Iterator for TimeIter<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<Time> {
-        winapi::WaitForSingleAsHandle(&self.0, -1, false).map_or(None, |r| if r == 0 { Some(Time::now()) } else { None })
+        winapi::WaitForSingleObject(&self.0, -1, false).map_or(None, |r| if r == 0 { Some(Time::now()) } else { None })
     }
 }
 impl Iterator for TimeIntoIter {
@@ -137,6 +139,6 @@ impl Iterator for TimeIntoIter {
 
     #[inline]
     fn next(&mut self) -> Option<Time> {
-        winapi::WaitForSingleAsHandle(&self.0, -1, false).map_or(None, |r| if r == 0 { Some(Time::now()) } else { None })
+        winapi::WaitForSingleObject(&self.0, -1, false).map_or(None, |r| if r == 0 { Some(Time::now()) } else { None })
     }
 }

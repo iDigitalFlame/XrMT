@@ -15,34 +15,39 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use alloc::sync::Arc;
-use core::slice;
+use core::ops::{Deref, DerefMut};
+use core::slice::from_raw_parts;
+use core::{cmp, matches};
 
 use crate::data::time::Time;
-use crate::device::winapi::{self, AsHandle, DecodeUtf16, FileBasicInfo, FileIdBothDirInfo, FileStandardInfo, FileStatInformation, Handle, OwnedHandle, WIN_TIME_EPOCH};
-use crate::util::stx::ffi::{OsString, Path, PathBuf};
-use crate::util::stx::io::{self, Error, Read, Seek, SeekFrom, Write};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{self, AsHandle, DecodeUtf16, FileAllInformation, FileBasicInformation, FileIdBothDirInfo, FileStandardInformation, FileStatInformation, Handle, Overlapped, OwnedHandle, Win32Error, WIN_TIME_EPOCH};
+use crate::ffi::OsString;
+use crate::ignore_error;
+use crate::io::{self, Error, Read, Seek, SeekFrom, Write};
+use crate::path::{Path, PathBuf};
+use crate::prelude::*;
+use crate::time::SystemTime;
 
-const READ: u16 = 0x1;
-const WRITE: u16 = 0x2;
-const APPEND: u16 = 0x4;
-const TRUNCATE: u16 = 0x8;
-const CREATE: u16 = 0x10;
-const CREATE_NEW: u16 = 0x20;
-const SYNCHRONOUS: u16 = 0x40;
-const NO_SYMLINK: u16 = 0x80;
-const EXCLUSIVE: u16 = 0x100;
-const DELETE: u16 = 0x200;
+const READ: u16 = 0x1u16;
+const WRITE: u16 = 0x2u16;
+const APPEND: u16 = 0x4u16;
+const TRUNCATE: u16 = 0x8u16;
+const CREATE: u16 = 0x10u16;
+const CREATE_NEW: u16 = 0x20u16;
+const SYNCHRONOUS: u16 = 0x40u16;
+const NO_SYMLINK: u16 = 0x80u16;
+const EXCLUSIVE: u16 = 0x100u16;
+const DELETE: u16 = 0x200u16;
 
 pub struct ReadDir {
-    buf:    [u8; 4096],
-    pos:    usize,
-    path:   Arc<PathBuf>,
-    owner:  File,
-    status: ReadStatus,
+    buf:   [u8; 4096],
+    pos:   usize,
+    path:  Arc<PathBuf>,
+    owner: File,
+    state: ReadState,
 }
 pub struct Metadata {
     pub attributes:       u32,
@@ -53,6 +58,7 @@ pub struct Metadata {
     pub reparse_tag:      u32,
     pub number_of_links:  u32,
     pub file_index:       u64,
+    pub access:           u32,
 }
 pub struct DirEntry {
     pub name: String,
@@ -64,6 +70,20 @@ pub struct FileType {
     attrs:   u32,
     reparse: u32,
 }
+pub struct FileTimes {
+    created:  Option<Time>,
+    accessed: Option<Time>,
+    modified: Option<Time>,
+}
+pub struct AsyncFile {
+    pos:  u64,
+    olp:  Box<Overlapped>,
+    file: File,
+}
+pub struct Permissions {
+    access:     u32,
+    attributes: u32,
+}
 pub struct OpenOptions {
     opts:   u16,
     share:  u32,
@@ -71,14 +91,14 @@ pub struct OpenOptions {
     access: u32,
 }
 pub struct DirBuilder(bool);
-pub struct Permissions(u32);
 pub struct File(OwnedHandle);
 
 pub trait FileExt {
-    fn seek_write(&self, buf: &[u8], offset: u64) -> io::Result<usize>;
-    fn seek_read(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize>;
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 }
 pub trait FileExtra {
+    fn access(&self) -> io::Result<u32>;
     fn name(&self) -> io::Result<String>;
     fn path(&self) -> io::Result<PathBuf>;
     fn delete(&mut self) -> io::Result<()>;
@@ -86,8 +106,10 @@ pub trait FileExtra {
     fn read_dir(&self) -> io::Result<ReadDir>;
     fn set_system(&self, system: bool) -> io::Result<()>;
     fn set_hidden(&self, hidden: bool) -> io::Result<()>;
+    fn set_modified(&self, time: Time) -> io::Result<()>;
     fn set_archive(&self, archive: bool) -> io::Result<()>;
     fn set_attributes(&self, attrs: u32) -> io::Result<()>;
+    fn set_times(&self, times: FileTimes) -> io::Result<()>;
     fn set_readonly(&self, readonly: bool) -> io::Result<()>;
 }
 pub trait FileTypeExt {
@@ -105,9 +127,10 @@ pub trait MetadataExt {
     fn volume_serial_number(&self) -> Option<u32>;
 }
 pub trait MetadataExtra {
-    fn created_time(&self) -> Time;
-    fn accessed_time(&self) -> Time;
-    fn modified_time(&self) -> Time;
+    fn mode(&self) -> u32;
+    fn created_time(&self) -> Option<Time>;
+    fn accessed_time(&self) -> Option<Time>;
+    fn modified_time(&self) -> Option<Time>;
 }
 pub trait DirEntryExtra {
     fn len(&self) -> u64;
@@ -137,6 +160,11 @@ pub trait OpenOptionsExt {
     fn attributes(&mut self, attributes: u32) -> &mut OpenOptions;
     fn security_qos_flags(&mut self, flags: u32) -> &mut OpenOptions;
 }
+pub trait FileTimesExtra {
+    fn set_created(self, t: Time) -> Self;
+    fn set_accessed(self, t: Time) -> Self;
+    fn set_modified(self, t: Time) -> Self;
+}
 pub trait OpenOptionsExtra {
     fn directory(&mut self) -> &mut OpenOptions;
     fn exclusive(&mut self, exclusive: bool) -> &mut OpenOptions;
@@ -144,11 +172,10 @@ pub trait OpenOptionsExtra {
     fn synchronous(&mut self, synchronous: bool) -> &mut OpenOptions;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ReadStatus {
-    Read,
-    Ready,
+enum ReadState {
     Empty,
+    Error,
+    Filled,
 }
 
 impl File {
@@ -183,7 +210,7 @@ impl File {
     }
     #[inline]
     pub fn try_clone(&self) -> io::Result<File> {
-        Ok(File(self.0.duplicate().map_err(Error::from)?))
+        Ok(File(self.0.duplicate()?))
     }
     #[inline]
     pub fn metadata(&self) -> io::Result<Metadata> {
@@ -192,12 +219,12 @@ impl File {
     #[inline]
     pub fn set_len(&self, size: u64) -> io::Result<()> {
         // 0x14 - FileEndOfFileInformation
-        winapi::NtSetInformationFile(self, 0x14, &size, 8).map_err(Error::from)?;
+        winapi::NtSetInformationFile(self, 0x14, &size, 8)?;
         Ok(())
     }
     #[inline]
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.set_attribute(perm.0)
+        self.set_attribute(perm.attributes)
     }
 
     #[inline]
@@ -221,19 +248,47 @@ impl ReadDir {
     #[inline]
     fn new(f: File) -> io::Result<ReadDir> {
         let mut i = ReadDir {
-            buf:    [0u8; 4096],
-            pos:    0,
-            path:   Arc::new(f.path()?),
-            owner:  f,
-            status: ReadStatus::Empty,
+            buf:   [0u8; 4096],
+            pos:   0usize,
+            path:  Arc::new(f.path()?),
+            owner: f,
+            state: ReadState::Error,
         };
-        // 0x25 - FileIdBothDirectoryInformation
-        i.status = if winapi::NtQueryDirectoryFile(&i.owner.0, &mut i.buf, 0x25, false, true, None).map_err(Error::from)? > 0 {
-            ReadStatus::Ready
-        } else {
-            ReadStatus::Empty
-        };
+        if winapi::NtQueryDirectoryFile(&i.owner, &mut i.buf, 0x25, false, true, None).map_err(Error::from)? > 0 {
+            i.state = ReadState::Filled;
+        }
         Ok(i)
+    }
+
+    #[inline]
+    fn refill(&mut self) {
+        if matches!(self.state, ReadState::Filled) {
+            return;
+        }
+        if winapi::NtQueryDirectoryFile(&self.owner, &mut self.buf, 0x25, false, false, None).map_or(false, |v| v > 0) {
+            (self.pos, self.state) = (0, ReadState::Filled);
+        } else {
+            self.state = ReadState::Error;
+        }
+    }
+    fn pull(&mut self) -> Option<DirEntry> {
+        let e = unsafe { (self.buf.as_ptr().add(self.pos) as *const FileIdBothDirInfo).as_ref()? };
+        self.pos += e.next_entry as usize;
+        if e.next_entry == 0 || e.name_length == 0 {
+            self.state = ReadState::Empty;
+        }
+        let b = unsafe { from_raw_parts(&e.file_name[0], e.name_length as usize / 2) };
+        return match e.name_length {
+            0 => return None,
+            2 if b[0] == b'.' as u16 => return None,
+            4 if b[0] == b'.' as u16 && b[1] == b'.' as u16 => return None,
+            _ => Some(DirEntry::new(
+                *self.owner.0,
+                self.path.clone(),
+                e,
+                b.decode_utf16(),
+            )),
+        };
     }
 }
 impl Metadata {
@@ -264,38 +319,115 @@ impl Metadata {
     }
     #[inline]
     pub fn permissions(&self) -> Permissions {
-        Permissions(self.attributes)
+        Permissions {
+            access:     self.access,
+            attributes: self.attributes,
+        }
+    }
+    #[inline]
+    pub fn created(&self) -> io::Result<SystemTime> {
+        Ok(winapi::time_from_windows_time(self.creation_time).into())
+    }
+    #[inline]
+    pub fn accessed(&self) -> io::Result<SystemTime> {
+        Ok(winapi::time_from_windows_time(self.last_access_time).into())
+    }
+    #[inline]
+    pub fn modified(&self) -> io::Result<SystemTime> {
+        Ok(winapi::time_from_windows_time(self.last_write_time).into())
     }
 
     fn file(f: &File) -> io::Result<Metadata> {
+        // We're gonna use a tiered approach to this. There's some ways to get this
+        // info quickly (FileStatInformation) but we have fallbacks for doing it
+        // into multiple calls.
+        //
+        // FileStatInformation (W10+, but fails for UNC/Shares)
+        //
+        // (Both below call FileAttributeTagInformation as the All struct does not
+        // contain it.)
+        // - FileAllInformation (Will fail if the name is +256 chars since we only
+        //   allocate 256).
+        // - FileAttributeTagInformation
+        //
+        // -or -
+        //
+        // - FileBasicInformation
+        // - FileStandardInformation
+        // - FileInternalInformation
+        // - FileAccessInformation
+        // - FileAttributeTagInformation
+        //
         // StatInfo is the quickest way to get all this info but it's Win10+ only.
         if winapi::is_min_windows_10() {
             let mut a = FileStatInformation::default();
             // NOTE(dij): Stat info is Win10+ only!
+            // This fails on mapped drives, so ignore it's errors.
             // 0x44 - FileStatInformation
-            winapi::NtQueryInformationFile(f, 0x44, &mut a, 0x48).map_err(Error::from)?;
-            return Ok(a.into());
+            if winapi::NtQueryInformationFile(f, 0x44, &mut a, 0x48).is_ok() {
+                return Ok(a.into());
+            }
         }
-        let (mut i, mut a) = (0u64, [0u32, 0u32]);
-        let mut b = FileBasicInfo::default();
-        let mut s = FileStandardInfo::default();
+        let mut a = FileAllInformation::default();
+        // 0x12 - FileAllInformation
+        // Always size 624.
+        // Ignore errors and fallback if this fails.
+        if winapi::NtQueryInformationFile(f, 0x12, &mut a, 0x270).is_ok() {
+            // 0x400 - FILE_ATTRIBUTE_REPARSE_POINT
+            // Don't lookup data if it's not a Reparse Point
+            let r = if a.basic.attributes & 0x400 != 0 {
+                let mut v = [0u32, 0u32];
+                // 0x23 - FileAttributeTagInformation
+                // Always size 8.
+                winapi::NtQueryInformationFile(f, 0x23, &mut v, 0x8)?;
+                v[1]
+            } else {
+                0
+            };
+            return Ok(Metadata {
+                access:           a.access,
+                file_size:        a.standard.end_of_file,
+                attributes:       a.basic.attributes,
+                file_index:       a.file_id,
+                reparse_tag:      r,
+                creation_time:    a.basic.creation_time,
+                number_of_links:  a.standard.number_of_links,
+                last_write_time:  a.basic.last_write_time,
+                last_access_time: a.basic.last_access_time,
+            });
+        }
+        let (mut i, mut a) = (0u64, 0u32);
+        let mut b = FileBasicInformation::default();
+        let mut s = FileStandardInformation::default();
         // 0x4 - FileBasicInformation
         // Always size 40.
-        winapi::NtQueryInformationFile(f, 0x4, &mut b, 0x28).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(f, 0x4, &mut b, 0x28)?;
         // 0x5 - FileStandardInformation
         // Always size 32.
-        winapi::NtQueryInformationFile(f, 0x5, &mut s, 0x20).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(f, 0x5, &mut s, 0x20)?;
         // 0x6 - FileInternalInformation
         // Always size 8.
-        winapi::NtQueryInformationFile(f, 0x6, &mut i, 0x8).map_err(Error::from)?;
-        // 0x23 - FileAttributeTagInformation
-        // Always size 8.
-        winapi::NtQueryInformationFile(f, 0x23, &mut a, 0x8).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(f, 0x6, &mut i, 0x8)?;
+        // 0x8 - FileAccessInformation
+        // Always size 4.
+        winapi::NtQueryInformationFile(f, 0x8, &mut a, 0x4)?;
+        // 0x400 - FILE_ATTRIBUTE_REPARSE_POINT
+        // Don't lookup data if it's not a Reparse Point
+        let r = if b.attributes & 0x400 != 0 {
+            let mut v = [0u32, 0u32];
+            // 0x23 - FileAttributeTagInformation
+            // Always size 8.
+            winapi::NtQueryInformationFile(f, 0x23, &mut v, 0x8)?;
+            v[1]
+        } else {
+            0
+        };
         Ok(Metadata {
+            access:           a,
             attributes:       b.attributes,
             file_size:        s.allocation_size,
             file_index:       i,
-            reparse_tag:      a[0],
+            reparse_tag:      r,
             creation_time:    b.creation_time,
             last_access_time: b.last_access_time,
             last_write_time:  b.last_write_time,
@@ -345,6 +477,107 @@ impl FileType {
         self.attrs & 0x400 != 0 && self.reparse & 0x20000000 != 0
     }
 }
+impl AsyncFile {
+    #[inline]
+    fn new(f: File) -> io::Result<AsyncFile> {
+        let mut o = Box::new(Overlapped::default());
+        o.event = Handle::take(winapi::CreateEvent(None, false, false, true, None)?);
+        Ok(AsyncFile { file: f, pos: 0u64, olp: o })
+    }
+
+    #[inline]
+    pub fn total(&self) -> u64 {
+        self.pos
+    }
+    #[inline]
+    pub fn event(&self) -> Handle {
+        self.olp.event
+    }
+    #[inline]
+    pub fn finish(&mut self, m: usize) -> io::Result<()> {
+        loop {
+            let r = some_or_continue!(self.update(true)?);
+            println!("loop {r}");
+            if r == m {
+                break;
+            }
+        }
+        Ok(())
+    }
+    #[inline]
+    pub fn update(&mut self, wait: bool) -> io::Result<Option<usize>> {
+        match winapi::GetOverlappedResult(&self.file, &self.olp, wait) {
+            Ok(n) => {
+                self.pos += n as u64;
+                Ok(Some(n))
+            },
+            Err(Win32Error::IoPending) => Ok(None),
+            Err(Win32Error::BrokenPipe) => Ok(Some(0)),
+            Err(e) => Err(e.into()),
+        }
+    }
+    pub fn write_async(&mut self, size: usize, buf: &[u8]) -> io::Result<bool> {
+        if self.update(false)?.is_some() && (self.pos as usize) >= buf.len() {
+            return Ok(true);
+        }
+        println!("enter");
+        loop {
+            if (self.pos as usize) >= buf.len() {
+                return Ok(true);
+            }
+            let i = self.pos as usize;
+            let m = cmp::min(i + size, buf.len());
+            println!("write? pos {i} to {m}");
+            self.pos += match winapi::NtWriteFile(
+                &mut self.file,
+                Some(&mut self.olp),
+                &buf[i..m],
+                Some(self.pos),
+            ) {
+                Ok(v) if v == 0 => return Ok(true),
+                Ok(v) => v as u64,
+                Err(e) if e == Win32Error::IoPending => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+        }
+    }
+    pub fn read_async(&mut self, size: usize, buf: &mut Vec<u8>) -> io::Result<bool> {
+        match self.update(false)? {
+            Some(v) if v == 0 && self.pos > 0 => return Ok(true),
+            Some(v) => {
+                let i = buf.len();
+                buf.truncate(i - (size - v));
+            },
+            _ => (),
+        }
+        loop {
+            let n = buf.len();
+            buf.resize(n + size, 0);
+            let i = match winapi::NtReadFile(
+                &mut self.file,
+                Some(&mut self.olp),
+                &mut buf[n..n + size],
+                Some(self.pos),
+            ) {
+                Ok(v) if v == 0 => return Ok(true),
+                Ok(v) => v,
+                Err(e) if e == Win32Error::IoPending => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            buf.truncate(n + i);
+        }
+    }
+}
+impl FileTimes {
+    #[inline]
+    pub const fn new() -> FileTimes {
+        FileTimes {
+            created:  None,
+            accessed: None,
+            modified: None,
+        }
+    }
+}
 impl DirBuilder {
     #[inline]
     pub fn new() -> DirBuilder {
@@ -366,9 +599,9 @@ impl OpenOptions {
     pub fn new() -> OpenOptions {
         OpenOptions {
             opts:   SYNCHRONOUS,
-            share:  0,
-            attrs:  0,
-            access: 0,
+            share:  0u32,
+            attrs:  0u32,
+            access: 0u32,
         }
     }
 
@@ -428,7 +661,7 @@ impl OpenOptions {
     }
     #[inline]
     pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
-        self.open_inner(winapi::INVALID, path)
+        self.open_inner(Handle::INVALID, 0, path)
     }
     #[inline]
     pub fn create_new(&mut self, create_new: bool) -> &mut OpenOptions {
@@ -439,10 +672,14 @@ impl OpenOptions {
         }
         self
     }
+    #[inline]
+    pub fn open_async(&self, path: impl AsRef<Path>) -> io::Result<AsyncFile> {
+        AsyncFile::new(self.open_inner(Handle::INVALID, 0x40000000, path)?)
+    }
 
-    fn open_inner(&self, parent: Handle, path: impl AsRef<Path>) -> io::Result<File> {
+    fn open_inner(&self, parent: Handle, add_attrs: u32, path: impl AsRef<Path>) -> io::Result<File> {
         let (a, b) = if self.access > 0 {
-            (self.access, 0)
+            (self.access, 0u32)
         } else {
             match (
                 self.opts & READ > 0,
@@ -451,13 +688,13 @@ impl OpenOptions {
                 self.opts & DELETE > 0,
             ) {
                 (_, _, _, true) => (0x110001, 0x7),           // DELETE | FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
-                (true, false, false, _) => (0x80100000, 0x1), // GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ
+                (true, false, false, _) => (0x80100080, 0x1), // GENERIC_READ | READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ
                 (false, true, false, _) => (0x40110000, 0x6), // GENERIC_WRITE | DELETE | SYNCHRONIZE, FILE_SHARE_WRITE | FILE_SHARE_DELETE
-                (true, true, false, _) => (0xC0110000, 0x7),  // GENERIC_READ | DELETE | SYNCHRONIZE | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                (true, true, false, _) => (0xC0110080, 0x7),  // GENERIC_READ | READ_ATTRIBUTES | DELETE | SYNCHRONIZE | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
                 (false, _, true, _) => (0x110114, 0x7),       // DELETE | SYNCHRONIZE | FILE_WRITE_ATTRIBUTES | FILE_APPEND_DATA | FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE |
                 // FILE_SHARE_DELETE
-                (true, _, true, _) => (0x80110114, 0x7), // GENERIC_READ | DELETE | SYNCHRONIZE | FILE_WRITE_ATTRIBUTES | FILE_APPEND_DATA | FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE |
-                // FILE_SHARE_DELETE
+                (true, _, true, _) => (0x80110194, 0x7), // GENERIC_READ | FILE READ_ATTRIBUTES | | DELETE | SYNCHRONIZE | FILE_WRITE_ATTRIBUTES | FILE_APPEND_DATA |
+                // FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
                 _ => (0, 0),
             }
         };
@@ -476,6 +713,7 @@ impl OpenOptions {
             a,
             c,
             self.attrs
+                | add_attrs
                 | if self.opts & CREATE_NEW > 0 || self.opts & NO_SYMLINK > 0 {
                     0x200000 // 0x200000 - FILE_FLAG_BACKUP_SEMANTICS
                 } else {
@@ -501,39 +739,43 @@ impl Permissions {
     #[inline]
     pub fn readonly(&self) -> bool {
         // 0x1 - FILE_ATTRIBUTE_READONLY
-        self.0 & 0x1 > 0
+        self.attributes & 0x1 != 0
     }
     #[inline]
     pub fn set_readonly(&mut self, readonly: bool) {
         // 0x1 - FILE_ATTRIBUTE_READONLY
-        self.0 = if readonly { self.0 | 0x1 } else { self.0 ^ &0x1 }
+        self.attributes = if readonly {
+            self.attributes | 0x1
+        } else {
+            self.attributes ^ &0x1
+        }
     }
 }
 
 impl Seek for File {
     #[inline]
     fn stream_len(&mut self) -> io::Result<u64> {
-        let mut s = FileStandardInfo::default();
+        let mut s = FileStandardInformation::default();
         // 0x5 - FileStandardInformation
         // Always size 32.
-        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20)?;
         Ok(s.end_of_file)
     }
     #[inline]
     fn stream_position(&mut self) -> io::Result<u64> {
         let mut n: u64 = 0;
         // 0xE - FilePositionInformation
-        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8)?;
         Ok(n)
     }
     #[inline]
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let (w, n) = match pos {
-            SeekFrom::End(n) => (0x2, n),
-            SeekFrom::Start(n) => (0x0, n as i64),
-            SeekFrom::Current(n) => (0x1, n),
+            SeekFrom::End(n) => (2, n),
+            SeekFrom::Start(n) => (0, n as i64),
+            SeekFrom::Current(n) => (1, n),
         };
-        winapi::SetFilePointerEx(&self.0, n, w).map_err(Error::from)
+        winapi::SetFilePointerEx(self, n, w).map_err(Error::from)
     }
 }
 impl Read for File {
@@ -543,7 +785,7 @@ impl Read for File {
     }
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        winapi::NtReadFile(&self.0, None, buf, None).map_err(Error::from)
+        winapi::NtReadFile(self, None, buf, None).map_err(Error::from)
     }
 }
 impl Write for File {
@@ -553,37 +795,37 @@ impl Write for File {
     }
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
-        winapi::NtFlushBuffersFile(&self.0).map_err(Error::from)
+        winapi::NtFlushBuffersFile(self).map_err(Error::from)
     }
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        winapi::NtWriteFile(&self.0, None, buf, None).map_err(Error::from)
+        winapi::NtWriteFile(self, None, buf, None).map_err(Error::from)
     }
 }
 impl Seek for &File {
     #[inline]
     fn stream_len(&mut self) -> io::Result<u64> {
-        let mut s = FileStandardInfo::default();
+        let mut s = FileStandardInformation::default();
         // 0x5 - FileStandardInformation
         // Always size 32.
-        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20)?;
         Ok(s.end_of_file)
     }
     #[inline]
     fn stream_position(&mut self) -> io::Result<u64> {
-        let mut n: u64 = 0;
+        let mut n = 0u64;
         // 0xE - FilePositionInformation
-        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8)?;
         Ok(n)
     }
     #[inline]
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let (w, n) = match pos {
-            SeekFrom::End(n) => (0x2, n),
-            SeekFrom::Start(n) => (0x0, n as i64),
-            SeekFrom::Current(n) => (0x1, n),
+            SeekFrom::End(n) => (2, n),
+            SeekFrom::Start(n) => (0, n as i64),
+            SeekFrom::Current(n) => (1, n),
         };
-        winapi::SetFilePointerEx(&self.0, n, w).map_err(Error::from)
+        winapi::SetFilePointerEx(self, n, w).map_err(Error::from)
     }
 }
 impl Read for &File {
@@ -593,7 +835,7 @@ impl Read for &File {
     }
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        winapi::NtReadFile(&self.0, None, buf, None).map_err(Error::from)
+        winapi::NtReadFile(self, None, buf, None).map_err(Error::from)
     }
 }
 impl Write for &File {
@@ -603,31 +845,31 @@ impl Write for &File {
     }
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
-        winapi::NtFlushBuffersFile(&self.0).map_err(Error::from)
+        winapi::NtFlushBuffersFile(self).map_err(Error::from)
     }
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        winapi::NtWriteFile(&self.0, None, buf, None).map_err(Error::from)
+        winapi::NtWriteFile(self, None, buf, None).map_err(Error::from)
     }
 }
 impl FileExt for File {
     #[inline]
-    fn seek_write(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        winapi::NtWriteFile(&self.0, None, buf, Some(offset)).map_err(Error::from)
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        winapi::NtWriteFile(self, None, buf, Some(offset)).map_err(Error::from)
     }
     #[inline]
-    fn seek_read(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         winapi::NtReadFile(self, None, buf, Some(offset)).map_err(Error::from)
     }
 }
 impl FileExt for &File {
     #[inline]
-    fn seek_write(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        winapi::NtWriteFile(&self.0, None, buf, Some(offset)).map_err(Error::from)
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        winapi::NtWriteFile(self, None, buf, Some(offset)).map_err(Error::from)
     }
     #[inline]
-    fn seek_read(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        winapi::NtReadFile(&self.0, None, buf, Some(offset)).map_err(Error::from)
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        winapi::NtReadFile(self, None, buf, Some(offset)).map_err(Error::from)
     }
 }
 impl AsHandle for File {
@@ -637,6 +879,13 @@ impl AsHandle for File {
     }
 }
 impl FileExtra for File {
+    #[inline]
+    fn access(&self) -> io::Result<u32> {
+        let mut i = 0u32;
+        // 0x8 - FileBasicInformation
+        winapi::NtQueryInformationFile(self, 0x4, &mut i, 0x4)?;
+        Ok(i)
+    }
     #[inline]
     fn name(&self) -> io::Result<String> {
         winapi::file_name_by_handle(self).map_err(Error::from)
@@ -648,16 +897,16 @@ impl FileExtra for File {
     #[inline]
     fn delete(&mut self) -> io::Result<()> {
         // 0xD - FileDispositionInformation
-        winapi::NtSetInformationFile::<u32>(&self.0, 0xD, &1, 4).map_err(Error::from)?;
-        winapi::CloseHandle(*self.0).map_err(Error::from)?;
+        winapi::NtSetInformationFile::<u32>(&self, 0xD, &1, 4)?;
+        winapi::CloseHandle(*self.0)?;
         self.0.set(0);
         Ok(())
     }
     #[inline]
     fn attributes(&self) -> io::Result<u32> {
-        let mut i = FileBasicInfo::default();
+        let mut i = FileBasicInformation::default();
         // 0x4 - FileBasicInformation
-        winapi::NtQueryInformationFile(self, 0x4, &mut i, 0x28).map_err(Error::from)?;
+        winapi::NtQueryInformationFile(self, 0x4, &mut i, 0x28)?;
         Ok(i.attributes)
     }
     #[inline]
@@ -668,7 +917,7 @@ impl FileExtra for File {
     fn set_system(&self, system: bool) -> io::Result<()> {
         let mut f = self.attributes()?;
         match f {
-            _ if system && f & 0x4 > 0 => return Ok(()),
+            _ if system && f & 0x4 != 0 => return Ok(()),
             _ if !system && f & 0x4 == 0 => return Ok(()),
             _ if system => f |= 0x4,  // 0x4 - FILE_ATTRIBUTE_SYSTEM
             _ if !system => f ^= 0x4, // 0x4 - FILE_ATTRIBUTE_SYSTEM
@@ -680,19 +929,23 @@ impl FileExtra for File {
     fn set_hidden(&self, hidden: bool) -> io::Result<()> {
         let mut f = self.attributes()?;
         match f {
-            _ if hidden && f & 0x2 > 0 => return Ok(()),
+            _ if hidden && f & 0x2 != 0 => return Ok(()),
             _ if !hidden && f & 0x2 == 0 => return Ok(()),
             _ if hidden => f |= 0x2,  // 0x2 - FILE_ATTRIBUTE_HIDDEN
             _ if !hidden => f ^= 0x2, // 0x2 - FILE_ATTRIBUTE_HIDDEN
             _ => (),
         };
-        self.set_attributes(f)
+        self.set_attribute(f)
+    }
+    #[inline]
+    fn set_modified(&self, time: Time) -> io::Result<()> {
+        winapi::set_file_time_by_handle(self, None, Some(time), None).map_err(Error::from)
     }
     #[inline]
     fn set_archive(&self, archive: bool) -> io::Result<()> {
         let mut f = self.attributes()?;
         match f {
-            _ if archive && f & 0x20 > 0 => return Ok(()),
+            _ if archive && f & 0x20 != 0 => return Ok(()),
             _ if !archive && f & 0x20 == 0 => return Ok(()),
             _ if archive => f |= 0x20,  // 0x20 - FILE_ATTRIBUTE_ARCHIVE
             _ if !archive => f ^= 0x20, // 0x20 - FILE_ATTRIBUTE_ARCHIVE
@@ -705,16 +958,30 @@ impl FileExtra for File {
         self.set_attribute(attrs)
     }
     #[inline]
+    fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        winapi::set_file_time_by_handle(self, times.created, times.modified, times.accessed).map_err(Error::from)
+    }
+    #[inline]
     fn set_readonly(&self, readonly: bool) -> io::Result<()> {
         let mut f = self.attributes()?;
         match f {
-            _ if readonly && f & 0x1 > 0 => return Ok(()),
+            _ if readonly && f & 0x1 != 0 => return Ok(()),
             _ if !readonly && f & 0x1 == 0 => return Ok(()),
             _ if readonly => f |= 0x1,  // 0x1 - FILE_ATTRIBUTE_READONLY
             _ if !readonly => f ^= 0x1, // 0x1 - FILE_ATTRIBUTE_READONLY
             _ => (),
         };
         self.set_attributes(f)
+    }
+}
+impl FileExt for &mut File {
+    #[inline]
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        winapi::NtWriteFile(&self.0, None, buf, Some(offset)).map_err(Error::from)
+    }
+    #[inline]
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        winapi::NtReadFile(&self.0, None, buf, Some(offset)).map_err(Error::from)
     }
 }
 impl AsHandle for &mut File {
@@ -733,6 +1000,237 @@ impl From<OwnedHandle> for File {
     #[inline]
     fn from(v: OwnedHandle) -> File {
         File(v)
+    }
+}
+
+impl Seek for AsyncFile {
+    #[inline]
+    fn stream_len(&mut self) -> io::Result<u64> {
+        let mut s = FileStandardInformation::default();
+        // 0x5 - FileStandardInformation
+        // Always size 32.
+        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20)?;
+        Ok(s.end_of_file)
+    }
+    #[inline]
+    fn stream_position(&mut self) -> io::Result<u64> {
+        let mut n: u64 = 0;
+        // 0xE - FilePositionInformation
+        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8)?;
+        Ok(n)
+    }
+    #[inline]
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let (w, n) = match pos {
+            SeekFrom::End(n) => (2, n),
+            SeekFrom::Start(n) => (0, n as i64),
+            SeekFrom::Current(n) => (1, n),
+        };
+        winapi::SetFilePointerEx(self, n, w).map_err(Error::from)
+    }
+}
+impl Read for AsyncFile {
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        false
+    }
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        winapi::NtReadFile(&mut self.file, Some(&mut self.olp), buf, Some(self.pos)).map_err(Error::from)
+    }
+}
+impl Drop for AsyncFile {
+    #[inline]
+    fn drop(&mut self) {
+        ignore_error!(winapi::CloseHandle(self.olp.event));
+    }
+}
+impl Write for AsyncFile {
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        false
+    }
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        winapi::NtFlushBuffersFile(self).map_err(Error::from)
+    }
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        winapi::NtWriteFile(&mut self.file, Some(&mut self.olp), buf, Some(self.pos)).map_err(Error::from)
+    }
+}
+impl Seek for &AsyncFile {
+    #[inline]
+    fn stream_len(&mut self) -> io::Result<u64> {
+        let mut s = FileStandardInformation::default();
+        // 0x5 - FileStandardInformation
+        // Always size 32.
+        winapi::NtQueryInformationFile(self, 0x5, &mut s, 0x20)?;
+        Ok(s.end_of_file)
+    }
+    #[inline]
+    fn stream_position(&mut self) -> io::Result<u64> {
+        let mut n = 0u64;
+        // 0xE - FilePositionInformation
+        winapi::NtQueryInformationFile(self, 0xE, &mut n, 8)?;
+        Ok(n)
+    }
+    #[inline]
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let (w, n) = match pos {
+            SeekFrom::End(n) => (2, n),
+            SeekFrom::Start(n) => (0, n as i64),
+            SeekFrom::Current(n) => (1, n),
+        };
+        winapi::SetFilePointerEx(self, n, w).map_err(Error::from)
+    }
+}
+impl Deref for AsyncFile {
+    type Target = File;
+
+    #[inline]
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+impl FileExt for AsyncFile {
+    #[inline]
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        winapi::NtWriteFile(&mut self.file, Some(&mut self.olp), buf, Some(offset)).map_err(Error::from)
+    }
+    #[inline]
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        winapi::NtReadFile(&mut self.file, Some(&mut self.olp), buf, Some(offset)).map_err(Error::from)
+    }
+}
+impl DerefMut for AsyncFile {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+impl AsHandle for AsyncFile {
+    #[inline]
+    fn as_handle(&self) -> Handle {
+        *self.file.0
+    }
+}
+impl FileExtra for AsyncFile {
+    #[inline]
+    fn access(&self) -> io::Result<u32> {
+        let mut i = 0u32;
+        // 0x8 - FileBasicInformation
+        winapi::NtQueryInformationFile(self, 0x4, &mut i, 0x4)?;
+        Ok(i)
+    }
+    #[inline]
+    fn name(&self) -> io::Result<String> {
+        winapi::file_name_by_handle(self).map_err(Error::from)
+    }
+    #[inline]
+    fn path(&self) -> io::Result<PathBuf> {
+        Ok(self.name()?.into())
+    }
+    #[inline]
+    fn delete(&mut self) -> io::Result<()> {
+        // 0xD - FileDispositionInformation
+        winapi::NtSetInformationFile::<u32>(&self, 0xD, &1, 4)?;
+        winapi::CloseHandle(*(self.file.0))?;
+        self.file.0.set(0);
+        Ok(())
+    }
+    #[inline]
+    fn attributes(&self) -> io::Result<u32> {
+        let mut i = FileBasicInformation::default();
+        // 0x4 - FileBasicInformation
+        winapi::NtQueryInformationFile(self, 0x4, &mut i, 0x28)?;
+        Ok(i.attributes)
+    }
+    #[inline]
+    fn read_dir(&self) -> io::Result<ReadDir> {
+        ReadDir::new(self.file.try_clone()?)
+    }
+    #[inline]
+    fn set_system(&self, system: bool) -> io::Result<()> {
+        let mut f = self.attributes()?;
+        match f {
+            _ if system && f & 0x4 != 0 => return Ok(()),
+            _ if !system && f & 0x4 == 0 => return Ok(()),
+            _ if system => f |= 0x4,  // 0x4 - FILE_ATTRIBUTE_SYSTEM
+            _ if !system => f ^= 0x4, // 0x4 - FILE_ATTRIBUTE_SYSTEM
+            _ => (),
+        };
+        self.file.set_attributes(f)
+    }
+    #[inline]
+    fn set_hidden(&self, hidden: bool) -> io::Result<()> {
+        let mut f = self.attributes()?;
+        match f {
+            _ if hidden && f & 0x2 != 0 => return Ok(()),
+            _ if !hidden && f & 0x2 == 0 => return Ok(()),
+            _ if hidden => f |= 0x2,  // 0x2 - FILE_ATTRIBUTE_HIDDEN
+            _ if !hidden => f ^= 0x2, // 0x2 - FILE_ATTRIBUTE_HIDDEN
+            _ => (),
+        };
+        self.file.set_attribute(f)
+    }
+    #[inline]
+    fn set_modified(&self, time: Time) -> io::Result<()> {
+        winapi::set_file_time_by_handle(self, None, Some(time), None).map_err(Error::from)
+    }
+    #[inline]
+    fn set_archive(&self, archive: bool) -> io::Result<()> {
+        let mut f = self.attributes()?;
+        match f {
+            _ if archive && f & 0x20 != 0 => return Ok(()),
+            _ if !archive && f & 0x20 == 0 => return Ok(()),
+            _ if archive => f |= 0x20,  // 0x20 - FILE_ATTRIBUTE_ARCHIVE
+            _ if !archive => f ^= 0x20, // 0x20 - FILE_ATTRIBUTE_ARCHIVE
+            _ => (),
+        };
+        self.set_attributes(f)
+    }
+    #[inline]
+    fn set_attributes(&self, attrs: u32) -> io::Result<()> {
+        self.file.set_attribute(attrs)
+    }
+    #[inline]
+    fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        winapi::set_file_time_by_handle(self, times.created, times.modified, times.accessed).map_err(Error::from)
+    }
+    #[inline]
+    fn set_readonly(&self, readonly: bool) -> io::Result<()> {
+        let mut f = self.attributes()?;
+        match f {
+            _ if readonly && f & 0x1 != 0 => return Ok(()),
+            _ if !readonly && f & 0x1 == 0 => return Ok(()),
+            _ if readonly => f |= 0x1,  // 0x1 - FILE_ATTRIBUTE_READONLY
+            _ if !readonly => f ^= 0x1, // 0x1 - FILE_ATTRIBUTE_READONLY
+            _ => (),
+        };
+        self.set_attributes(f)
+    }
+}
+impl FileExt for &mut AsyncFile {
+    #[inline]
+    fn seek_write(&mut self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        winapi::NtWriteFile(&mut self.file, Some(&mut self.olp), buf, Some(offset)).map_err(Error::from)
+    }
+    #[inline]
+    fn seek_read(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        winapi::NtReadFile(&mut self.file, Some(&mut self.olp), buf, Some(offset)).map_err(Error::from)
+    }
+}
+impl AsHandle for &mut AsyncFile {
+    #[inline]
+    fn as_handle(&self) -> Handle {
+        *self.file.0
+    }
+}
+impl AsHandle for &mut &AsyncFile {
+    #[inline]
+    fn as_handle(&self) -> Handle {
+        *self.file.0
     }
 }
 
@@ -768,98 +1266,66 @@ impl Eq for Permissions {}
 impl Clone for Permissions {
     #[inline]
     fn clone(&self) -> Permissions {
-        Permissions(self.0)
+        Permissions {
+            access:     self.access,
+            attributes: self.attributes,
+        }
     }
 }
 impl PartialEq for Permissions {
     #[inline]
     fn eq(&self, other: &Permissions) -> bool {
-        self.0 == other.0
+        self.attributes == other.attributes && self.access == self.access
     }
 }
 impl PermissionsExt for Permissions {
     #[inline]
     fn set_system(&mut self, system: bool) {
         // 0x4 - FILE_ATTRIBUTE_SYSTEM
-        self.0 = if system { self.0 | 0x4 } else { self.0 ^ &0x4 }
+        self.attributes = if system {
+            self.attributes | 0x4
+        } else {
+            self.attributes ^ &0x4
+        }
     }
     #[inline]
     fn set_hidden(&mut self, hidden: bool) {
         // 0x2 - FILE_ATTRIBUTE_HIDDEN
-        self.0 = if hidden { self.0 | 0x2 } else { self.0 ^ &0x2 }
+        self.attributes = if hidden {
+            self.attributes | 0x2
+        } else {
+            self.attributes ^ &0x2
+        }
     }
     #[inline]
     fn set_archive(&mut self, archive: bool) {
         // 0x20 - FILE_ATTRIBUTE_ARCHIVE
-        self.0 = if archive { self.0 | 0x20 } else { self.0 ^ &0x20 }
+        self.attributes = if archive {
+            self.attributes | 0x20
+        } else {
+            self.attributes ^ &0x20
+        }
     }
     #[inline]
     fn set_attributes(&mut self, attrs: u32) {
-        self.0 = attrs
+        self.attributes = attrs
     }
 }
 
 impl Iterator for ReadDir {
-    type Item = DirEntry;
+    type Item = io::Result<DirEntry>;
 
-    fn next(&mut self) -> Option<DirEntry> {
-        if self.status == ReadStatus::Empty {
-            return None;
+    #[inline]
+    fn next(&mut self) -> Option<io::Result<DirEntry>> {
+        self.refill();
+        match self.state {
+            ReadState::Empty | ReadState::Error => return None,
+            _ => (),
         }
-        if self.pos > 0 || self.status == ReadStatus::Ready {
-            let x = unsafe { (self.buf.as_ptr().add(self.pos) as *const FileIdBothDirInfo).as_ref()? };
-            self.pos += x.next_entry as usize;
-            if x.next_entry == 0 {
-                self.status = if self.status == ReadStatus::Ready {
-                    ReadStatus::Read
-                } else {
-                    ReadStatus::Empty
-                };
-                self.pos = 0;
-            } else if self.status == ReadStatus::Ready {
-                self.status = ReadStatus::Read;
-            }
-            if x.name_length == 0 {
-                return self.next();
-            }
-            let b = unsafe { slice::from_raw_parts(&x.file_name[0], x.name_length as usize / 2) };
-            return match x.name_length {
-                0 => self.next(),
-                2 if b[0] == b'.' as u16 => self.next(),
-                4 if b[0] == b'.' as u16 && b[1] == b'.' as u16 => self.next(),
-                _ => Some(DirEntry::new(
-                    *self.owner.0,
-                    self.path.clone(),
-                    x,
-                    b.decode_utf16(),
-                )),
-            };
+        if let Some(e) = self.pull() {
+            return Some(Ok(e));
         }
-        // 0x25 - FileIdBothDirectoryInformation
-        if winapi::NtQueryDirectoryFile(&self.owner, &mut self.buf, 0x25, false, false, None).unwrap_or_default() == 0 {
-            self.status = ReadStatus::Empty;
-            return None;
-        }
-        let x = unsafe { (self.buf.as_ptr() as *const FileIdBothDirInfo).as_ref()? };
-        self.pos = x.next_entry as usize;
-        if x.next_entry == 0 {
-            self.status = ReadStatus::Empty;
-        }
-        if x.name_length == 0 {
-            return self.next();
-        }
-        let b = unsafe { slice::from_raw_parts(&x.file_name[0], x.name_length as usize / 2) };
-        return match x.name_length {
-            0 => self.next(),
-            2 if b[0] == b'.' as u16 => self.next(),
-            4 if b[0] == b'.' as u16 && b[1] == b'.' as u16 => self.next(),
-            _ => Some(DirEntry::new(
-                *self.owner.0,
-                self.path.clone(),
-                x,
-                winapi::utf16_to_str(b),
-            )),
-        };
+        self.next()
     }
 }
 
@@ -1012,7 +1478,7 @@ impl DirEntryExtra for DirEntry {
     }
     #[inline]
     fn open(&self, opts: &OpenOptions) -> io::Result<File> {
-        opts.open_inner(self.owner, &self.name)
+        opts.open_inner(self.owner, 0, &self.name)
     }
 }
 
@@ -1020,6 +1486,7 @@ impl Clone for Metadata {
     #[inline]
     fn clone(&self) -> Metadata {
         Metadata {
+            access:           self.access,
             file_size:        self.file_size,
             file_index:       self.file_index,
             attributes:       self.attributes,
@@ -1067,30 +1534,79 @@ impl MetadataExt for Metadata {
 }
 impl MetadataExtra for Metadata {
     #[inline]
-    fn created_time(&self) -> Time {
-        Time::from_nano((self.creation_time - WIN_TIME_EPOCH) * 100)
+    fn mode(&self) -> u32 {
+        let mut m = if self.is_symlink() { 0x8000000u32 } else { 0u32 };
+        if self.is_dir() {
+            m |= 0x80000000;
+        }
+        if self.access == 0 {
+            return m | 0x1B4;
+        }
+        // 0x80000000 - GENERIC_READ
+        if self.access & 0x80000000 != 0 {
+            m |= 0x124;
+        }
+        // 0x40000000 - GENERIC_WRITE
+        if self.access & 0x40000000 != 0 {
+            m |= 0x92;
+        }
+        // 0x20000000 - GENERIC_EXECUTE
+        if self.access & 0x20000000 != 0 {
+            m |= 0x49;
+        }
+        // 0x10000000 - GENERIC_ALL
+        if self.access & 0x10000000 != 0 {
+            m |= 0x1FF;
+        }
+        // 0x00020000 - STANDARD_RIGHTS_READ
+        if self.access & 0x20000 != 0 {
+            m |= 0x180;
+        }
+        // 0x1 - FILE_READ_DATA
+        if self.access & 0x1 != 0 {
+            m |= 0x100;
+        }
+        // 0x2 - FILE_WRITE_DATA
+        // 0x4 - FILE_APPEND_DATA
+        if self.access & 0x6 != 0 {
+            m |= 0x80;
+        }
+        // 0x20 - FILE_EXECUTE
+        if self.access & 0x20 != 0 {
+            m |= 0x40;
+        }
+        // 0x1F01FF - FILE_ALL_ACCESS
+        if self.access & 0x1F01FF != 0 {
+            m |= 0x1C0
+        }
+        m
     }
     #[inline]
-    fn accessed_time(&self) -> Time {
-        Time::from_nano((self.last_access_time - WIN_TIME_EPOCH) * 100)
+    fn created_time(&self) -> Option<Time> {
+        Some(winapi::time_from_windows_time(self.creation_time))
     }
     #[inline]
-    fn modified_time(&self) -> Time {
-        Time::from_nano((self.last_write_time - WIN_TIME_EPOCH) * 100)
+    fn accessed_time(&self) -> Option<Time> {
+        Some(winapi::time_from_windows_time(self.last_access_time))
+    }
+    #[inline]
+    fn modified_time(&self) -> Option<Time> {
+        Some(winapi::time_from_windows_time(self.last_write_time))
     }
 }
 impl From<&FileIdBothDirInfo> for Metadata {
     #[inline]
     fn from(v: &FileIdBothDirInfo) -> Metadata {
         Metadata {
-            file_size:        v.allocation_size,
+            access:           0u32,
+            file_size:        v.end_of_file,
             file_index:       v.file_id,
             attributes:       v.attributes,
-            reparse_tag:      0,
+            reparse_tag:      0u32,
             creation_time:    v.creation_time,
-            last_access_time: v.last_access_time,
+            number_of_links:  0u32,
             last_write_time:  v.last_write_time,
-            number_of_links:  0,
+            last_access_time: v.last_access_time,
         }
     }
 }
@@ -1098,7 +1614,8 @@ impl From<FileStatInformation> for Metadata {
     #[inline]
     fn from(v: FileStatInformation) -> Metadata {
         Metadata {
-            file_size:        v.allocation_size,
+            access:           v.access,
+            file_size:        v.end_of_file,
             file_index:       v.file_id,
             attributes:       v.attributes,
             reparse_tag:      v.reparse_tag,
@@ -1106,6 +1623,50 @@ impl From<FileStatInformation> for Metadata {
             last_access_time: v.last_access_time,
             last_write_time:  v.last_write_time,
             number_of_links:  v.number_of_links,
+        }
+    }
+}
+
+impl Copy for FileTimes {}
+impl Clone for FileTimes {
+    #[inline]
+    fn clone(&self) -> FileTimes {
+        FileTimes {
+            created:  self.created.clone(),
+            accessed: self.accessed.clone(),
+            modified: self.modified.clone(),
+        }
+    }
+}
+impl Default for FileTimes {
+    #[inline]
+    fn default() -> FileTimes {
+        FileTimes::new()
+    }
+}
+impl FileTimesExtra for FileTimes {
+    #[inline]
+    fn set_created(self, t: Time) -> FileTimes {
+        FileTimes {
+            created:  Some(t),
+            accessed: self.accessed,
+            modified: self.modified,
+        }
+    }
+    #[inline]
+    fn set_accessed(self, t: Time) -> FileTimes {
+        FileTimes {
+            created:  self.created,
+            accessed: Some(t),
+            modified: self.modified,
+        }
+    }
+    #[inline]
+    fn set_modified(self, t: Time) -> FileTimes {
+        FileTimes {
+            created:  self.created,
+            accessed: self.accessed,
+            modified: Some(t),
         }
     }
 }
@@ -1146,6 +1707,10 @@ pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     Ok(b)
 }
 #[inline]
+pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    DirBuilder::new().create(path.as_ref())
+}
+#[inline]
 pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     OpenOptions::new()
         .directory()
@@ -1175,7 +1740,11 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 }
 #[inline]
 pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
-    File::open(path)?.metadata()
+    OpenOptions::new().read(true).directory().open(path)?.metadata()
+}
+#[inline]
+pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+    DirBuilder::new().recursive(true).create(path.as_ref())
 }
 pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     let mut f = File::open(path)?;
@@ -1218,8 +1787,10 @@ pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<(
 
 fn remove_dir_inner(f: &File, o: &OpenOptions) -> io::Result<()> {
     for e in f.read_dir()? {
-        let h = e.open(o)?;
-        if e.is_dir() {
+        // This will never fail as we don't error on ReadDir entries.
+        let t = unsafe { e.unwrap_unchecked() };
+        let h = t.open(o)?;
+        if t.is_dir() {
             remove_dir_inner(&h, o)?;
         }
         winapi::delete_file_by_handle(h).map_err(Error::from)?;

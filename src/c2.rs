@@ -16,12 +16,26 @@
 
 #![no_implicit_prelude]
 
-mod client;
-mod ops;
-mod transform;
-mod wrapper;
-
 pub use self::client::*;
-use self::ops::*;
+pub use self::connect::*;
+pub use self::error::*;
+pub use self::session::*;
 pub use self::transform::*;
 pub use self::wrapper::*;
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+use self::state::*;
+use self::vars::*;
+
+pub mod cfg;
+mod client;
+mod connect;
+mod error;
+pub mod event;
+mod mux;
+mod session;
+mod state;
+pub mod task;
+mod transform;
+mod vars;
+mod wrapper;

@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use crate::device::winapi::loader::{Function, Loader};
@@ -24,15 +24,14 @@ pub(crate) static LsaClose: Function = Function::new();
 pub(crate) static LsaOpenPolicy: Function = Function::new();
 pub(crate) static LsaQueryInformationPolicy: Function = Function::new();
 
-pub(crate) static IsWellKnownSID: Function = Function::new(); // Forward to kernelbase.dll in Win7+
-pub(crate) static CreateWellKnownSid: Function = Function::new(); // Forward to kernelbase.dll in Win7+
+// pub(crate) static IsWellKnownSID: Function = Function::new(); // Forward to
+// kernelbase.dll in Win7+
 
+// TODO(dij): Do we need this now?
 pub(crate) static LookupAccountSid: Function = Function::new();
 pub(crate) static LookupPrivilegeValue: Function = Function::new(); // TODO(dij): Might not be needed with predefined SID privs.
-pub(crate) static CheckTokenMembership: Function = Function::new(); // Forward to kernelbase.dll in Win7+
 
 pub(crate) static SystemFunction036: Function = Function::new(); // Forward to cryptbase.dll -> bcrypt.dll in Win7+
-pub(crate) static ConvertSIDToStringSID: Function = Function::new();
 pub(crate) static InitiateSystemShutdownEx: Function = Function::new();
 pub(crate) static ConvertStringSecurityDescriptorToSecurityDescriptor: Function = Function::new();
 
@@ -50,15 +49,12 @@ pub(super) static DLL: Loader = Loader::new(|advapi32| {
     advapi32.proc(&LsaOpenPolicy, 0x34D221F9);
     advapi32.proc(&LsaQueryInformationPolicy, 0xD67C4D8B);
 
-    advapi32.proc(&IsWellKnownSID, 0xF855936A);
-    advapi32.proc(&CreateWellKnownSid, 0x25F61A8E);
+    // advapi32.proc(&IsWellKnownSID, 0xF855936A);
 
     advapi32.proc(&LookupAccountSid, 0x59E27333);
     advapi32.proc(&LookupPrivilegeValue, 0xEC6FF8D6);
-    advapi32.proc(&CheckTokenMembership, 0xE42E234E);
 
     advapi32.proc(&SystemFunction036, 0x7FD1A2D9); // This is a forwarded function.
-    advapi32.proc(&ConvertSIDToStringSID, 0x7AAB722D);
     advapi32.proc(&InitiateSystemShutdownEx, 0xDA8731DD);
     advapi32.proc(
         &ConvertStringSecurityDescriptorToSecurityDescriptor,

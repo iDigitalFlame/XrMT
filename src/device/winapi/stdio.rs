@@ -15,14 +15,14 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
+
+use crate::device::winapi::{self, AsHandle, Handle};
+use crate::io::{self, BufRead, BufReader, Error, ErrorKind, Lines, Read, Write};
+use crate::prelude::*;
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 pub(super) use self::inner::write_console;
-
-use crate::device::winapi::{self, AsHandle, Handle};
-use crate::util::stx::io::{self, BufRead, BufReader, Error, ErrorKind, Lines, Read, Write};
-use crate::util::stx::prelude::*;
 
 pub struct Stdin(Handle);
 pub struct Stdout(Handle);
@@ -37,7 +37,7 @@ pub struct StderrLock<'a>(&'a Stderr);
 impl Stdin {
     #[inline]
     pub fn get() -> Stdin {
-        Stdin(unsafe { (*(*(winapi::GetCurrentProcessPEB())).process_parameters).standard_input })
+        Stdin(winapi::GetCurrentProcessPEB().process_params().standard_input)
     }
 
     #[inline]
@@ -63,7 +63,7 @@ impl Stdin {
 impl Stdout {
     #[inline]
     pub fn get() -> Stdout {
-        Stdout(unsafe { (*(*(winapi::GetCurrentProcessPEB())).process_parameters).standard_output })
+        Stdout(winapi::GetCurrentProcessPEB().process_params().standard_output)
     }
 
     #[inline]
@@ -78,7 +78,7 @@ impl Stdout {
 impl Stderr {
     #[inline]
     pub fn get() -> Stderr {
-        Stderr(unsafe { (*(*(winapi::GetCurrentProcessPEB())).process_parameters).standard_error })
+        Stderr(winapi::GetCurrentProcessPEB().process_params().standard_error)
     }
 
     #[inline]
@@ -268,30 +268,37 @@ mod inner {
     use core::cmp;
 
     use crate::device::winapi::{self, Handle, Win32Result};
-    use crate::util::stx::prelude::*;
-
-    // Link to kernel32.WriteConsoleA instead of loading via our loader so we can
-    // debug issues with loading of API functions.
-    #[link(name = "kernel32")]
-    extern "stdcall" {
-        fn WriteConsoleA(h: Handle, s: *const u8, n: u32, w: *mut u32, r: u32) -> u32;
-    }
+    use crate::prelude::*;
 
     pub fn write_console(h: Handle, buf: &[u8]) -> Win32Result<usize> {
-        let mut n = 0;
-        let i = cmp::min(buf.len(), u32::MAX as usize) as u32;
-        let r = unsafe { WriteConsoleA(h, buf.as_ptr(), i, &mut n, 0) };
+        let mut n = 0u32;
+        let r = unsafe {
+            WriteConsoleA(
+                h,
+                buf.as_ptr(),
+                cmp::min(buf.len(), 0xFFFFFFFF) as u32,
+                &mut n,
+                0,
+            )
+        };
         if r == 0 {
             Err(winapi::last_error())
         } else {
             Ok(n as usize)
         }
     }
+
+    // This is used to allow for free use of 'print{,ln}' when debugging and
+    // will not deadlock in sensitive areas.
+    #[link(name = "kernel32")]
+    extern "stdcall" {
+        fn WriteConsoleA(h: Handle, s: *const u8, n: u32, w: *mut u32, r: u32) -> u32;
+    }
 }
 #[cfg(not(feature = "bugs"))]
 mod inner {
     use crate::device::winapi::{self, Handle, Win32Result};
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
 
     #[inline]
     pub fn write_console(h: Handle, buf: &[u8]) -> Win32Result<usize> {

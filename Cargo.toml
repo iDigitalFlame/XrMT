@@ -20,21 +20,17 @@ default             = []
 std                 = []
 bugs                = []
 snap                = []
-crypt               = ["implant"]
-implant             = []
-nosweep             = []
-swap                = []
+crypt               = ["strip"]
+strip               = []
 ews                 = []
 pie                 = []
-nokeyset            = []
-noproxy             = []
-heap_track          = []
-multiproxy          = []
+no_proxy            = []
+heap_track          = ["bugs"]
 limit_tiny          = []
 limit_small         = []
 limit_large         = []
-limit_nofrag        = []
 limit_medium        = []
+limit_no_frag       = []
 
 [profile.dev]
 panic               = "abort"
@@ -48,9 +44,5 @@ opt-level           = 3
 overflow-checks     = false
 debug-assertions    = false
 
-[dependencies]
-hmac-sha256         = { version = "1.1.6", default-features = false }
-
 [target.'cfg(unix)'.dependencies]
-libc                = { version = "0.2.141",  default-features = false }
-interfaces          = { version = "0.0.8", default-features = false }
+libc                = { version = "0.2.155",  default-features = false, features = ["extra_traits"] }

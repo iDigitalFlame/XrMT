@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use crate::device::winapi::loader::{Function, Loader};
@@ -145,6 +145,19 @@ pub(crate) static NtSetInformationToken: Function = Function::new();
 pub(crate) static NtAdjustTokenPrivileges: Function = Function::new();
 pub(crate) static NtQueryInformationToken: Function = Function::new();
 
+#[cfg(not(target_pointer_width = "64"))]
+mod wow {
+    use crate::device::winapi::loader::Function;
+
+    pub(crate) static NtWow64ReadVirtualMemory64: Function = Function::new();
+    pub(crate) static NtWow64WriteVirtualMemory64: Function = Function::new();
+    pub(crate) static NtWow64AllocateVirtualMemory64: Function = Function::new();
+    pub(crate) static NtWow64QueryInformationProcess64: Function = Function::new();
+}
+
+#[cfg(not(target_pointer_width = "64"))]
+pub(crate) use self::wow::*;
+
 pub(super) static DLL: Loader = Loader::new(|ntdll| {
     ntdll.proc(&LdrLoadDll, 0xB6936493);
     ntdll.proc(&LdrUnloadDll, 0x630D7790);
@@ -270,6 +283,14 @@ pub(super) static DLL: Loader = Loader::new(|ntdll| {
     ntdll.proc(&NtSetInformationToken, 0x43623A4);
     ntdll.proc(&NtAdjustTokenPrivileges, 0x6CCF6931);
     ntdll.proc(&NtQueryInformationToken, 0x63C176C4);
+
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        ntdll.proc(&NtWow64ReadVirtualMemory64, 0x24CC52C4);
+        ntdll.proc(&NtWow64WriteVirtualMemory64, 0x7626B3AB);
+        ntdll.proc(&NtWow64AllocateVirtualMemory64, 0xEB1033F);
+        ntdll.proc(&NtWow64QueryInformationProcess64, 0x77A90561);
+    }
 });
 
 #[inline]

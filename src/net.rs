@@ -18,12 +18,7 @@
 
 pub use self::inner::*;
 
-#[cfg(unix)]
-mod inner {
-    extern crate std;
-    pub use std::net::*;
-}
-#[cfg(windows)]
+#[cfg(all(target_family = "windows", not(feature = "std")))]
 #[path = "device/winapi/std"]
 mod inner {
     extern crate core;
@@ -33,4 +28,9 @@ mod inner {
     #[cfg_attr(rustfmt, rustfmt_skip)]
     pub use core::net::*;
     pub use self::net::*;
+}
+#[cfg(any(not(target_family = "windows"), feature = "std"))]
+mod inner {
+    extern crate std;
+    pub use std::net::*;
 }

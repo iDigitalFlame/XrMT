@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case, non_upper_case_globals)]
 
 extern crate core;
@@ -85,7 +85,7 @@ pub(super) static DLL: Loader = Loader::new(|winsock| {
 
 #[inline]
 pub(super) fn wsa_cleanup() {
-    if WSACleanup == false {
+    if !WSACleanup.is_loaded() {
         return;
     }
     unsafe { winapi::syscall!(*WSACleanup, extern "stdcall" fn() -> i32,) };

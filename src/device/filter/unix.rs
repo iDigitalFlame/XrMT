@@ -15,4 +15,28 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(unix)]
+#![cfg(not(target_family = "windows"))]
+
+use core::alloc::Allocator;
+
+use crate::prelude::*;
+use crate::process::filter::{Filter, FilterError, FilterFunc};
+
+// TODO(dij): Now that we have the ability to view processes on all systems
+//            we should revisit this on non-Windows systems as we can atleast
+//            support the reterival of PIDs from names.
+
+impl<A: Allocator> Filter<A> {
+    #[inline]
+    pub fn select(&self) -> Result<u32, FilterError> {
+        self.select_func(None)
+    }
+    #[inline]
+    pub fn select_func(&self, _func: FilterFunc) -> Result<u32, FilterError> {
+        if self.pid > 0 {
+            Ok(self.pid)
+        } else {
+            Err(FilterError::NoProcessFound)
+        }
+    }
+}

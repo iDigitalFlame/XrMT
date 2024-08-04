@@ -16,7 +16,9 @@
 
 #![no_implicit_prelude]
 
+mod hmac;
 mod keypair;
 mod p521;
 
+pub use self::hmac::*;
 pub use self::keypair::*;

@@ -15,14 +15,17 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use alloc::borrow::Cow;
-use core::iter;
+use alloc::alloc::Global;
+use core::alloc::Allocator;
+use core::iter::once;
 
 use crate::data::blob::Blob;
-use crate::util::stx::ffi::{OsString, PathBuf};
-use crate::util::stx::prelude::*;
+use crate::data::str::Fiber;
+use crate::ffi::OsString;
+use crate::path::PathBuf;
+use crate::prelude::*;
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 pub use self::ansi::*;
@@ -34,37 +37,9 @@ pub use self::wchar::*;
 pub trait DecodeUtf16 {
     fn decode_utf16(&self) -> String;
 }
-pub trait MaybeString {
-    fn into_string(&self) -> Option<&str>;
-}
 
 pub type Chars = Blob<u8, 256>;
 pub type WChars = Blob<u16, 128>;
-
-impl MaybeString for &str {
-    #[inline]
-    fn into_string(&self) -> Option<&str> {
-        Some(self)
-    }
-}
-impl MaybeString for String {
-    #[inline]
-    fn into_string(&self) -> Option<&str> {
-        Some(self)
-    }
-}
-impl MaybeString for Option<&str> {
-    #[inline]
-    fn into_string(&self) -> Option<&str> {
-        *self
-    }
-}
-impl MaybeString for Cow<'_, str> {
-    #[inline]
-    fn into_string(&self) -> Option<&str> {
-        Some(self)
-    }
-}
 
 impl From<Char> for String {
     #[inline]
@@ -106,6 +81,49 @@ impl From<UnicodeString> for String {
     #[inline]
     fn from(v: UnicodeString) -> String {
         v.into_string()
+    }
+}
+
+impl From<Char> for Fiber {
+    #[inline]
+    fn from(v: Char) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<WChar> for Fiber {
+    #[inline]
+    fn from(v: WChar) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<CharPtr> for Fiber {
+    #[inline]
+    fn from(v: CharPtr) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<WCharPtr> for Fiber {
+    #[inline]
+    fn from(v: WCharPtr) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<AnsiString> for Fiber {
+    #[inline]
+    fn from(v: AnsiString) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<StringBlock> for Fiber {
+    #[inline]
+    fn from(v: StringBlock) -> Fiber {
+        v.into_fiber(Global)
+    }
+}
+impl From<UnicodeString> for Fiber {
+    #[inline]
+    fn from(v: UnicodeString) -> Fiber {
+        v.into_fiber(Global)
     }
 }
 
@@ -155,57 +173,57 @@ impl<const N: usize> ToString for Blob<u16, N> {
 }
 impl<const N: usize> From<&str> for Blob<u16, N> {
     #[inline]
-    fn from(s: &str) -> Blob<u16, N> {
-        if s.len() == 0 {
+    fn from(v: &str) -> Blob<u16, N> {
+        if v.is_empty() {
             Blob::new()
         } else {
-            s.encode_utf16().chain(iter::once(0)).collect::<Blob<u16, N>>()
+            v.encode_utf16().chain(once(0)).collect::<Blob<u16, N>>()
         }
     }
 }
 impl<const N: usize> From<String> for Blob<u16, N> {
     #[inline]
-    fn from(s: String) -> Blob<u16, N> {
-        Blob::from(s.as_str())
+    fn from(v: String) -> Blob<u16, N> {
+        Blob::from(v.as_str())
     }
 }
 impl<const N: usize> From<Option<&str>> for Blob<u16, N> {
     #[inline]
-    fn from(s: Option<&str>) -> Blob<u16, N> {
-        s.map_or_else(Blob::new, |v| Blob::from(v))
+    fn from(v: Option<&str>) -> Blob<u16, N> {
+        v.map_or_else(Blob::new, Blob::from)
     }
 }
 impl<const N: usize> From<Option<String>> for Blob<u16, N> {
     #[inline]
-    fn from(s: Option<String>) -> Blob<u16, N> {
-        s.map_or_else(Blob::new, |v| Blob::from(v.as_str()))
+    fn from(v: Option<String>) -> Blob<u16, N> {
+        v.map_or_else(Blob::new, |x| Blob::from(x.as_str()))
     }
 }
 
 impl<const N: usize> From<&str> for Blob<u8, N> {
     #[inline]
-    fn from(s: &str) -> Blob<u8, N> {
+    fn from(v: &str) -> Blob<u8, N> {
         // NOTE(dij): As much as using '.into()' would work, we have to remember
         //            that we need the NUL byte after for these to work.
-        s.as_bytes().iter().copied().chain(iter::once(0)).collect::<Blob<u8, N>>()
+        v.as_bytes().iter().copied().chain(once(0)).collect::<Blob<u8, N>>()
     }
 }
 impl<const N: usize> From<String> for Blob<u8, N> {
     #[inline]
-    fn from(s: String) -> Blob<u8, N> {
-        s.as_bytes().iter().copied().chain(iter::once(0)).collect::<Blob<u8, N>>()
+    fn from(v: String) -> Blob<u8, N> {
+        v.as_bytes().iter().copied().chain(once(0)).collect::<Blob<u8, N>>()
     }
 }
 impl<const N: usize> From<Option<&str>> for Blob<u8, N> {
     #[inline]
-    fn from(s: Option<&str>) -> Blob<u8, N> {
-        s.map_or_else(Blob::new, |v| v.into())
+    fn from(v: Option<&str>) -> Blob<u8, N> {
+        v.map_or_else(Blob::new, |x| x.into())
     }
 }
 impl<const N: usize> From<Option<String>> for Blob<u8, N> {
     #[inline]
-    fn from(s: Option<String>) -> Blob<u8, N> {
-        s.map_or_else(Blob::new, |v| v.as_str().into())
+    fn from(v: Option<String>) -> Blob<u8, N> {
+        v.map_or_else(Blob::new, |x| x.as_str().into())
     }
 }
 
@@ -230,7 +248,7 @@ impl<const N: usize> DecodeUtf16 for Blob<u16, N> {
 
 #[inline]
 pub fn utf16_to_str(v: &[u16]) -> String {
-    if v.len() == 0 {
+    if v.is_empty() {
         String::new()
     } else {
         char::decode_utf16(v.iter().cloned())
@@ -240,7 +258,7 @@ pub fn utf16_to_str(v: &[u16]) -> String {
 }
 #[inline]
 pub fn utf16_to_str_trim(v: &[u16]) -> String {
-    if v.len() == 0 {
+    if v.is_empty() {
         String::new()
     } else {
         match v.iter().position(|v| *v == 0) {
@@ -249,14 +267,43 @@ pub fn utf16_to_str_trim(v: &[u16]) -> String {
         }
     }
 }
+#[inline]
+pub fn utf16_to_fiber<A: Allocator>(v: &[u16], alloc: A) -> Fiber<A> {
+    if v.is_empty() {
+        Fiber::new_in(alloc)
+    } else {
+        let mut b = Fiber::new_in(alloc);
+        for c in char::decode_utf16(v.iter().cloned()).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)) {
+            b.push(c)
+        }
+        b
+    }
+}
+#[inline]
+pub fn utf16_to_fiber_trim<A: Allocator>(v: &[u16], alloc: A) -> Fiber<A> {
+    if v.is_empty() {
+        Fiber::new_in(alloc)
+    } else {
+        match v.iter().position(|v| *v == 0) {
+            Some(i) => utf16_to_fiber(&v[0..i], alloc),
+            None => utf16_to_fiber(v, alloc),
+        }
+    }
+}
 
 mod char {
+    use core::alloc::Allocator;
+    use core::iter::once;
     use core::ops::Deref;
-    use core::{iter, ptr, slice};
+    use core::ptr;
+    use core::slice::from_raw_parts;
+    use core::str::from_utf8_unchecked;
 
     use crate::data::blob::Blob;
-    use crate::util::stx::ffi::{OsStr, OsString, Path, PathBuf};
-    use crate::util::stx::prelude::*;
+    use crate::data::str::Fiber;
+    use crate::ffi::{OsStr, OsString};
+    use crate::path::{Path, PathBuf};
+    use crate::prelude::*;
 
     pub struct Char(Vec<u8>);
     #[repr(transparent)]
@@ -301,7 +348,7 @@ mod char {
             if self.0.is_empty() {
                 String::new()
             } else {
-                unsafe { core::str::from_utf8_unchecked(&self.0) }.to_string()
+                unsafe { from_utf8_unchecked(&self.0) }.to_string()
             }
         }
         #[inline]
@@ -315,6 +362,18 @@ mod char {
             } else {
                 self.0.as_mut_ptr()
             }
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.0.is_empty() {
+                Fiber::new_in(alloc)
+            } else {
+                self.0.into_alloc(alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
         }
     }
     impl CharPtr {
@@ -330,12 +389,16 @@ mod char {
         pub fn string(v: *const u8) -> String {
             CharPtr(v).into_string()
         }
+        #[inline]
+        pub fn fiber<A: Allocator>(v: *const u8, alloc: A) -> Fiber<A> {
+            CharPtr(v).into_fiber(alloc)
+        }
 
         pub fn len(&self) -> usize {
             if self.0.is_null() {
                 return 0;
             }
-            let mut n = 0;
+            let mut n = 0usize;
             while unsafe { *self.0.add(n) } > 0 {
                 n += 1
             }
@@ -347,7 +410,7 @@ mod char {
         }
         #[inline]
         pub fn as_slice(&self) -> &[u8] {
-            unsafe { slice::from_raw_parts(self.0, self.len()) }
+            unsafe { from_raw_parts(self.0, self.len()) }
         }
         #[inline]
         pub fn as_ptr(&self) -> *const u8 {
@@ -358,7 +421,7 @@ mod char {
             if self.is_null() {
                 String::new()
             } else {
-                unsafe { core::str::from_utf8_unchecked(self.as_slice()) }.to_string()
+                unsafe { from_utf8_unchecked(self.as_slice()) }.to_string()
             }
         }
         #[inline]
@@ -372,6 +435,22 @@ mod char {
         #[inline]
         pub fn as_mut_ptr(&mut self) -> *mut u8 {
             self.0 as *mut u8
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.is_null() {
+                Fiber::new_in(alloc)
+            } else {
+                self.as_slice().into_alloc(alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
+        #[inline]
+        pub fn to_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u8, 256, A> {
+            Blob::with_values_in(self.as_slice(), alloc)
         }
     }
 
@@ -397,17 +476,17 @@ mod char {
     }
     impl From<&str> for Char {
         #[inline]
-        fn from(s: &str) -> Char {
-            Char::from(s.as_bytes())
+        fn from(v: &str) -> Char {
+            Char::from(v.as_bytes())
         }
     }
     impl From<&[u8]> for Char {
         #[inline]
-        fn from(s: &[u8]) -> Char {
-            if s.len() == 0 {
+        fn from(v: &[u8]) -> Char {
+            if v.is_empty() {
                 Char::default()
             } else {
-                Char(s.iter().copied().chain(iter::once(0)).collect::<Vec<u8>>())
+                Char(v.iter().copied().chain(once(0)).collect::<Vec<u8>>())
             }
         }
     }
@@ -425,8 +504,8 @@ mod char {
     }
     impl From<String> for Char {
         #[inline]
-        fn from(s: String) -> Char {
-            Char::from(s.as_bytes())
+        fn from(v: String) -> Char {
+            Char::from(v.as_bytes())
         }
     }
     impl From<PathBuf> for Char {
@@ -443,14 +522,20 @@ mod char {
     }
     impl From<Option<&str>> for Char {
         #[inline]
-        fn from(s: Option<&str>) -> Char {
-            s.map_or_else(Char::default, |v| Char::from(v.as_bytes()))
+        fn from(v: Option<&str>) -> Char {
+            v.map_or_else(Char::default, |x| Char::from(x.as_bytes()))
         }
     }
     impl From<Option<String>> for Char {
         #[inline]
-        fn from(s: Option<String>) -> Char {
-            s.map_or_else(Char::default, |v| Char::from(v.as_bytes()))
+        fn from(v: Option<String>) -> Char {
+            v.map_or_else(Char::default, |x| Char::from(x.as_bytes()))
+        }
+    }
+    impl<A: Allocator> From<Fiber<A>> for Char {
+        #[inline]
+        fn from(v: Fiber<A>) -> Char {
+            Char::from(v.as_bytes())
         }
     }
 
@@ -471,11 +556,13 @@ mod char {
     }
 }
 mod ansi {
-    use core::slice;
+    use core::alloc::Allocator;
+    use core::slice::from_raw_parts;
 
-    use super::CharPtr;
     use crate::data::blob::Blob;
-    use crate::util::stx::prelude::*;
+    use crate::data::str::Fiber;
+    use crate::device::winapi::CharPtr;
+    use crate::prelude::*;
 
     #[repr(C)]
     pub struct AnsiString {
@@ -505,35 +592,51 @@ mod ansi {
         }
         #[inline]
         pub fn as_slice(&self) -> &[u8] {
-            unsafe { slice::from_raw_parts(self.buffer.as_ptr(), self.length as usize) }
+            unsafe { from_raw_parts(self.buffer.as_ptr(), self.length as usize) }
         }
         #[inline]
         pub fn into_string(self) -> String {
             if self.length == 0 || self.max_length == 0 || self.buffer.is_null() {
                 String::new()
             } else {
-                unsafe {
-                    core::str::from_utf8_unchecked(slice::from_raw_parts(
-                        self.buffer.as_ptr(),
-                        self.length as usize,
-                    ))
-                }
-                .to_string()
+                unsafe { core::str::from_utf8_unchecked(from_raw_parts(self.buffer.as_ptr(), self.length as usize)) }.to_string()
             }
         }
         #[inline]
         pub fn to_blob(&self) -> Blob<u8, 256> {
-            self.as_slice().iter().collect::<Blob<u8, 256>>()
+            self.as_slice().into()
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.length == 0 || self.max_length == 0 || self.buffer.is_null() {
+                Fiber::new_in(alloc)
+            } else {
+                unsafe { from_raw_parts(self.buffer.as_ptr(), self.length as usize) }.into_alloc(alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
+        #[inline]
+        pub fn to_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u8, 256, A> {
+            Blob::with_values_in(self.as_slice(), alloc)
         }
     }
 }
 mod wchar {
+    use alloc::alloc::Global;
+    use core::alloc::Allocator;
+    use core::iter::once;
     use core::ops::Deref;
-    use core::{iter, ptr, slice};
+    use core::ptr;
+    use core::slice::from_raw_parts;
 
     use crate::data::blob::Blob;
-    use crate::util::stx::ffi::{OsStr, OsString, Path, PathBuf};
-    use crate::util::stx::prelude::*;
+    use crate::data::str::Fiber;
+    use crate::ffi::{OsStr, OsString};
+    use crate::path::{Path, PathBuf};
+    use crate::prelude::*;
 
     pub struct WChar(Vec<u16>);
     #[repr(transparent)]
@@ -593,6 +696,18 @@ mod wchar {
                 self.0.as_mut_ptr()
             }
         }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.0.is_empty() {
+                Fiber::new_in(alloc)
+            } else {
+                super::utf16_to_fiber(&self.0, alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
     }
     impl WCharPtr {
         #[inline]
@@ -607,12 +722,16 @@ mod wchar {
         pub fn string(v: *const u16) -> String {
             WCharPtr(v).into_string()
         }
+        #[inline]
+        pub fn fiber<A: Allocator>(v: *const u16, alloc: A) -> Fiber<A> {
+            WCharPtr(v).into_fiber(alloc)
+        }
 
         pub fn len(&self) -> usize {
             if self.0.is_null() {
                 return 0;
             }
-            let mut n = 0;
+            let mut n = 0usize;
             while unsafe { *self.0.add(n) > 0 } {
                 n += 1
             }
@@ -624,7 +743,7 @@ mod wchar {
         }
         #[inline]
         pub fn as_slice(&self) -> &[u16] {
-            unsafe { slice::from_raw_parts(self.0, self.len()) }
+            unsafe { from_raw_parts(self.0, self.len()) }
         }
         #[inline]
         pub fn into_string(self) -> String {
@@ -652,7 +771,29 @@ mod wchar {
         }
         #[inline]
         pub fn to_u16_blob(&self) -> Blob<u16, 256> {
-            self.as_slice().iter().collect::<Blob<u16, 256>>()
+            self.to_u16_blob_in(Global)
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.is_null() {
+                Fiber::new_in(alloc)
+            } else {
+                super::utf16_to_fiber(self.as_slice(), alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
+        #[inline]
+        pub fn to_u8_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u8, 256, A> {
+            let mut b = Blob::new_in(alloc);
+            self.as_slice().iter().map(|v| *v as u8).collect_into(&mut b);
+            b
+        }
+        #[inline]
+        pub fn to_u16_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u16, 256, A> {
+            Blob::with_values_in(self.as_slice(), alloc)
         }
     }
 
@@ -678,11 +819,11 @@ mod wchar {
     }
     impl From<&str> for WChar {
         #[inline]
-        fn from(s: &str) -> WChar {
-            if s.len() == 0 {
+        fn from(v: &str) -> WChar {
+            if v.is_empty() {
                 WChar::default()
             } else {
-                WChar(s.encode_utf16().chain(iter::once(0)).collect::<Vec<u16>>())
+                WChar(v.encode_utf16().chain(once(0)).collect::<Vec<u16>>())
             }
         }
     }
@@ -700,8 +841,8 @@ mod wchar {
     }
     impl From<String> for WChar {
         #[inline]
-        fn from(s: String) -> WChar {
-            WChar::from(s.as_str())
+        fn from(v: String) -> WChar {
+            WChar::from(v.as_str())
         }
     }
     impl From<PathBuf> for WChar {
@@ -718,14 +859,14 @@ mod wchar {
     }
     impl From<Option<&str>> for WChar {
         #[inline]
-        fn from(s: Option<&str>) -> WChar {
-            s.map_or_else(WChar::default, |v| WChar::from(v))
+        fn from(v: Option<&str>) -> WChar {
+            v.map_or_else(WChar::default, WChar::from)
         }
     }
     impl From<Option<String>> for WChar {
         #[inline]
-        fn from(s: Option<String>) -> WChar {
-            s.map_or_else(WChar::default, |v| WChar::from(v.as_str()))
+        fn from(v: Option<String>) -> WChar {
+            v.map_or_else(WChar::default, |x| WChar::from(x.as_str()))
         }
     }
 
@@ -746,12 +887,14 @@ mod wchar {
     }
 }
 mod block {
+    use core::alloc::Allocator;
     use core::ops::Deref;
-    use core::slice;
+    use core::slice::from_raw_parts;
 
     use crate::data::blob::Blob;
-    use crate::util::stx::ffi::OsString;
-    use crate::util::stx::prelude::*;
+    use crate::data::str::Fiber;
+    use crate::ffi::OsString;
+    use crate::prelude::*;
 
     pub struct VariableIter<'a> {
         pos: usize,
@@ -766,7 +909,7 @@ mod block {
             if self.0.is_null() {
                 return 0;
             }
-            let (mut n, mut c) = (0, 0);
+            let (mut n, mut c) = (0usize, 0u32);
             loop {
                 if unsafe { *self.0.add(n) } == 0 {
                     c += 1;
@@ -786,7 +929,7 @@ mod block {
         }
         #[inline]
         pub fn as_slice(&self) -> &[u16] {
-            unsafe { slice::from_raw_parts(self.0, self.len()) }
+            unsafe { from_raw_parts(self.0, self.len()) }
         }
         #[inline]
         pub fn into_string(self) -> String {
@@ -810,9 +953,31 @@ mod block {
             self.iter().find(|v| v.is_key(&k))?.value_as_string()
         }
         #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.0.is_null() {
+                Fiber::new_in(alloc)
+            } else {
+                super::utf16_to_fiber(self.as_slice(), alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
+        #[inline]
         pub fn find_as_blob(&self, key: impl AsRef<str>) -> Option<Blob<u8, 256>> {
             let k = key.as_ref().encode_utf16().collect::<Blob<u16, 256>>();
             self.iter().find(|v| v.is_key(&k))?.value_as_blob()
+        }
+        #[inline]
+        pub fn find_as_fiber<A: Allocator>(&self, key: impl AsRef<str>, alloc: A) -> Option<Fiber<A>> {
+            let k = key.as_ref().encode_utf16().collect::<Blob<u16, 256>>();
+            self.iter().find(|v| v.is_key(&k))?.value_as_fiber(alloc)
+        }
+        #[inline]
+        pub fn find_as_blob_in<A: Allocator>(&self, key: impl AsRef<str>, alloc: A) -> Option<Blob<u8, 256, A>> {
+            let k = key.as_ref().encode_utf16().collect::<Blob<u16, 256>>();
+            self.iter().find(|v| v.is_key(&k))?.value_as_blob_in(alloc)
         }
 
         unsafe fn next_entry(&self, pos: usize) -> Option<(&[u16], usize)> {
@@ -825,7 +990,7 @@ mod block {
                             break;
                         }
                         if n - pos > 1 {
-                            return Some((slice::from_raw_parts(self.0.add(pos), n - pos), n + 1));
+                            return Some((from_raw_parts(self.0.add(pos), n - pos), n + 1));
                         }
                     },
                     _ => c = 0,
@@ -859,6 +1024,24 @@ mod block {
                     .map(|v| *v as u8)
                     .collect::<Blob<u8, 256>>(),
             )
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.0.is_empty() {
+                Fiber::new_in(alloc)
+            } else {
+                super::utf16_to_fiber(self.0, alloc)
+            }
+        }
+        #[inline]
+        pub fn value_as_fiber<A: Allocator>(&self, alloc: A) -> Option<Fiber<A>> {
+            Some(super::utf16_to_fiber(unsafe { self.value() }?, alloc))
+        }
+        #[inline]
+        pub fn value_as_blob_in<A: Allocator>(&self, alloc: A) -> Option<Blob<u8, 256, A>> {
+            let mut b = Blob::new_in(alloc);
+            unsafe { self.value() }?.iter().map(|v| *v as u8).collect_into(&mut b);
+            Some(b)
         }
 
         #[inline]
@@ -927,14 +1110,18 @@ mod block {
     }
 }
 mod unicode {
+    use core::alloc::Allocator;
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
-    use core::{ptr, slice};
+    use core::ptr;
+    use core::slice::{from_raw_parts, from_raw_parts_mut};
 
-    use super::{WChar, WCharPtr};
     use crate::data::blob::Blob;
-    use crate::util::stx::ffi::{OsStr, OsString, Path, PathBuf};
-    use crate::util::stx::prelude::*;
+    use crate::data::str::Fiber;
+    use crate::device::winapi::{WChar, WCharPtr};
+    use crate::ffi::{OsStr, OsString};
+    use crate::path::{Path, PathBuf};
+    use crate::prelude::*;
 
     pub struct UnicodeStr {
         pub value: UnicodeString,
@@ -983,7 +1170,7 @@ mod unicode {
         }
         #[inline]
         pub fn as_slice(&self) -> &[u16] {
-            unsafe { slice::from_raw_parts(self.buffer.as_ptr(), (self.length / 2) as usize) }
+            unsafe { from_raw_parts(self.buffer.as_ptr(), (self.length / 2) as usize) }
         }
         #[inline]
         pub fn into_string(self) -> String {
@@ -1001,12 +1188,38 @@ mod unicode {
         pub fn to_u16_blob(&self) -> Blob<u16, 256> {
             self.as_slice().iter().collect::<Blob<u16, 256>>()
         }
+        #[inline]
+        pub fn as_slice_mut(&mut self) -> &mut [u16] {
+            unsafe { from_raw_parts_mut(self.buffer.as_mut_ptr(), (self.length / 2) as usize) }
+        }
+        #[inline]
+        pub fn to_fiber<A: Allocator>(&self, alloc: A) -> Fiber<A> {
+            if self.length == 0 || self.max_length == 0 || self.buffer.is_null() {
+                Fiber::new_in(alloc)
+            } else {
+                super::utf16_to_fiber(&self.as_slice(), alloc)
+            }
+        }
+        #[inline]
+        pub fn into_fiber<A: Allocator>(self, alloc: A) -> Fiber<A> {
+            self.to_fiber(alloc)
+        }
+        #[inline]
+        pub fn to_u8_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u8, 256, A> {
+            let mut b = Blob::new_in(alloc);
+            self.as_slice().iter().map(|v| *v as u8).collect_into(&mut b);
+            b
+        }
+        #[inline]
+        pub fn to_u16_blob_in<A: Allocator>(&self, alloc: A) -> Blob<u16, 256, A> {
+            Blob::with_values_in(self.as_slice(), alloc)
+        }
 
         #[inline]
         pub(crate) fn hash(&self) -> u32 {
-            let mut h: u32 = 0x811C9DC5;
+            let mut h = 0x811C9DC5u32;
             for i in self.as_slice() {
-                h = h.wrapping_mul(0x1000193);
+                h = h.wrapping_mul(0x1000193u32);
                 h ^= match *i as u8 {
                     b'A'..=b'Z' => *i + 0x20,
                     _ => *i,
@@ -1047,15 +1260,15 @@ mod unicode {
     }
     impl From<&str> for UnicodeStr {
         #[inline]
-        fn from(s: &str) -> UnicodeStr {
-            let n = s.len() as u16 * 2;
+        fn from(v: &str) -> UnicodeStr {
+            let n = v.len() as u16 * 2;
             // NOTE(dij): ^ Length captured here so we don't need to worry
             //              about subtracting the NUL value from length.
             if n == 0 {
                 return UnicodeStr::default();
             }
             let mut r = UnicodeStr {
-                buf:   ManuallyDrop::new(WChar::from(s)),
+                buf:   ManuallyDrop::new(WChar::from(v)),
                 value: UnicodeString {
                     buffer:     WCharPtr::null(),
                     length:     n,
@@ -1080,8 +1293,8 @@ mod unicode {
     }
     impl From<String> for UnicodeStr {
         #[inline]
-        fn from(s: String) -> UnicodeStr {
-            UnicodeStr::from(s.as_str())
+        fn from(v: String) -> UnicodeStr {
+            UnicodeStr::from(v.as_str())
         }
     }
     impl From<PathBuf> for UnicodeStr {
@@ -1098,14 +1311,14 @@ mod unicode {
     }
     impl From<Option<&str>> for UnicodeStr {
         #[inline]
-        fn from(s: Option<&str>) -> UnicodeStr {
-            s.map_or_else(UnicodeStr::default, |v| UnicodeStr::from(v))
+        fn from(v: Option<&str>) -> UnicodeStr {
+            v.map_or_else(UnicodeStr::default, UnicodeStr::from)
         }
     }
     impl From<Option<String>> for UnicodeStr {
         #[inline]
-        fn from(s: Option<String>) -> UnicodeStr {
-            s.map_or_else(UnicodeStr::default, |v| UnicodeStr::from(v.as_str()))
+        fn from(v: Option<String>) -> UnicodeStr {
+            v.map_or_else(UnicodeStr::default, |x| UnicodeStr::from(x.as_str()))
         }
     }
 
@@ -1114,19 +1327,20 @@ mod unicode {
         fn default() -> UnicodeString {
             UnicodeString {
                 buffer:     WCharPtr::null(),
-                length:     0,
-                max_length: 0,
+                length:     0u16,
+                max_length: 0u16,
             }
         }
     }
 }
 
-#[cfg(feature = "implant")]
+#[cfg(feature = "strip")]
 mod display {
     use core::fmt::{self, Debug, Formatter};
+    use core::str::from_utf8_unchecked;
 
-    use super::{AnsiString, Char, CharPtr, StringBlock, UnicodeStr, UnicodeString, Variable, WChar, WCharPtr};
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::{AnsiString, Char, CharPtr, StringBlock, UnicodeStr, UnicodeString, Variable, WChar, WCharPtr};
+    use crate::prelude::*;
 
     impl Debug for Char {
         #[inline]
@@ -1137,10 +1351,10 @@ mod display {
     impl ToString for Char {
         #[inline]
         fn to_string(&self) -> String {
-            if self.len() == 0 {
+            if self.is_empty() {
                 String::new()
             } else {
-                unsafe { core::str::from_utf8_unchecked(self.as_slice()) }.to_string()
+                unsafe { from_utf8_unchecked(self.as_slice()) }.to_string()
             }
         }
     }
@@ -1157,7 +1371,7 @@ mod display {
             if self.is_null() {
                 String::new()
             } else {
-                unsafe { core::str::from_utf8_unchecked(self.as_slice()) }.to_string()
+                unsafe { from_utf8_unchecked(self.as_slice()) }.to_string()
             }
         }
     }
@@ -1174,7 +1388,7 @@ mod display {
             if self.length == 0 || self.max_length == 0 || self.buffer.is_null() {
                 String::new()
             } else {
-                unsafe { core::str::from_utf8_unchecked(self.as_slice()) }.to_string()
+                unsafe { from_utf8_unchecked(self.as_slice()) }.to_string()
             }
         }
     }
@@ -1188,7 +1402,7 @@ mod display {
     impl ToString for WChar {
         #[inline]
         fn to_string(&self) -> String {
-            if self.len() == 0 {
+            if self.is_empty() {
                 String::new()
             } else {
                 super::utf16_to_str_trim(self.as_slice())
@@ -1276,12 +1490,13 @@ mod display {
         }
     }
 }
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, Write};
+    use core::str::from_utf8_unchecked;
 
-    use super::{AnsiString, Char, CharPtr, StringBlock, UnicodeStr, UnicodeString, Variable, WChar, WCharPtr};
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::{AnsiString, Char, CharPtr, StringBlock, UnicodeStr, UnicodeString, Variable, WChar, WCharPtr};
+    use crate::prelude::*;
 
     impl Debug for Char {
         #[inline]
@@ -1292,10 +1507,10 @@ mod display {
     impl Display for Char {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            if self.len() == 0 {
+            if self.is_empty() {
                 Ok(())
             } else {
-                f.write_str(unsafe { core::str::from_utf8_unchecked(self.as_slice()) })
+                f.write_str(unsafe { from_utf8_unchecked(self.as_slice()) })
             }
         }
     }
@@ -1312,7 +1527,7 @@ mod display {
             if self.is_null() {
                 Ok(())
             } else {
-                f.write_str(unsafe { core::str::from_utf8_unchecked(self.as_slice()) })
+                f.write_str(unsafe { from_utf8_unchecked(self.as_slice()) })
             }
         }
     }
@@ -1329,7 +1544,7 @@ mod display {
             if self.length == 0 || self.max_length == 0 || self.buffer.is_null() {
                 Ok(())
             } else {
-                f.write_str(unsafe { core::str::from_utf8_unchecked(self.as_slice()) })
+                f.write_str(unsafe { from_utf8_unchecked(self.as_slice()) })
             }
         }
     }
@@ -1343,7 +1558,7 @@ mod display {
     impl Display for WChar {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            if self.len() == 0 {
+            if self.is_empty() {
                 Ok(())
             } else {
                 f.write_str(&super::utf16_to_str(self.as_slice()))

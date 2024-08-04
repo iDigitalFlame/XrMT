@@ -15,13 +15,15 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::device::winapi::{self, Handle};
+use crate::device::winapi::loader::LoadType;
+use crate::device::winapi::{self, Handle, LoaderEntry};
+use crate::ignore_error;
+use crate::prelude::*;
 use crate::util::crypt;
-use crate::util::stx::prelude::*;
 
 static DLL_INIT: AtomicBool = AtomicBool::new(false);
 
@@ -29,37 +31,33 @@ static DLL_INIT: AtomicBool = AtomicBool::new(false);
 pub(crate) fn init_ntdll() {
     init();
 }
-#[allow(dead_code)] // TODO(dij)
 #[inline]
 pub(crate) fn init_amsi() {
     init();
     super::amsi::DLL.load_if_name(|| crypt::get_or(0, "amsi.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
 #[inline]
 pub(crate) fn init_gdi32() {
     init();
     super::gdi32::DLL.load_if_name(|| crypt::get_or(0, "gdi32.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
+#[allow(dead_code)] // TODO(dij): Finish
 #[inline]
 pub(crate) fn init_psapi() {
     init();
     super::psapi::DLL.load_if_name(|| crypt::get_or(0, "psapi.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
 #[inline]
 pub(crate) fn init_user32() {
     init();
     super::user32::DLL.load_if_name(|| crypt::get_or(0, "user32.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
+#[allow(dead_code)] // TODO(dij): Finish
 #[inline]
 pub(crate) fn init_crypt32() {
     init();
     super::crypt32::DLL.load_if_name(|| crypt::get_or(0, "crypt32.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
 #[inline]
 pub(crate) fn init_dbghelp() {
     init();
@@ -70,7 +68,7 @@ pub(crate) fn init_userenv() {
     init();
     super::userenv::DLL.load_if_name(|| crypt::get_or(0, "userenv.dll"))
 }
-#[allow(dead_code)] // TODO(dij)
+#[allow(dead_code)] // TODO(dij): Finish
 #[inline]
 pub(crate) fn init_winhttp() {
     init();
@@ -92,7 +90,7 @@ pub(crate) fn init_kernel32() {
     super::kernel32::KERNELBASE.load(false, |d| {
         // NOTE(dij): This may fail on older Windows versions, so we're going to
         //            ignore the error instead of crashing.
-        let _ = d.load_name(crypt::get_or(0, "kernelbase.dll")); // IGNORE ERROR
+        ignore_error!(d.load_if_name(|| crypt::get_or(0, "kernelbase.dll")));
         Ok(())
     });
     super::kernel32::KERNEL32.load_if_name(|| crypt::get_or(0, "kernel32.dll"))
@@ -127,76 +125,92 @@ unsafe fn init_inner() {
     // besides the 'Ldr' syscalls.
     //
     // If any other calls are made, this WILL cause a CRASH!!!
-    let mut next = (*(*winapi::GetCurrentProcessPEB()).ldr).module_list.f_link;
-    let mut e = [Handle(0); 0x10];
-    loop {
-        crate::bugprint!(
-            "LOADER: Found loaded DLL '{}'.",
-            (*next).base_name.to_string()
+    //
+    // NOTE(dij): Don't make an iter for this, we want to have the least amount
+    //            of moving parts here.
+    let mut e = [(Handle(0usize), LoadType::Linked); 0x10];
+    for i in winapi::GetCurrentProcessPEB().load_list().iter() {
+        bugtrack!(
+            "Mapper::init(): Found PEB DLL '{}' ({:X}).",
+            i.full_name.to_string(),
+            i.dll_base
         );
         // Match DLL name by its lower FNV32 hash.
-        match (*next).base_name.hash() {
+        match i.base_name.hash() {
             // ntdll.dll
-            0xA9ACADD3 => e[0x0] = (*next).dll_base,
+            // NOTE(dij): We don't increase the load count for ntdll as it will
+            //            never be unloaded.
+            0xA9ACADD3 => e[0x0] = (i.dll_base, LoadType::Linked),
             // kernelbase.dll
-            0x55AA707B => e[0x1] = (*next).dll_base,
+            0x55AA707B => e[0x1] = load(i),
             // kernel32.dll
-            0xD741ACCF => e[0x2] = (*next).dll_base,
+            0xD741ACCF => e[0x2] = load(i),
             // advapi32.dll
-            0x316180CD => e[0x3] = (*next).dll_base,
+            0x316180CD => e[0x3] = load(i),
             // user32.dll
-            0xB1CC909D => e[0x4] = (*next).dll_base,
+            0xB1CC909D => e[0x4] = load(i),
             // userenv.dll
-            0x614A9C5B => e[0x5] = (*next).dll_base,
+            0x614A9C5B => e[0x5] = load(i),
             // ws2_32.dll
-            0x6CFD82A3 => e[0x6] = (*next).dll_base,
+            0x6CFD82A3 => e[0x6] = load(i),
             // iphlpapi.dll
-            0x86DA0E28 => e[0x7] = (*next).dll_base,
+            0x86DA0E28 => e[0x7] = load(i),
             // netapi32.dll
-            0x0AB85C5F => e[0x8] = (*next).dll_base,
+            0x0AB85C5F => e[0x8] = load(i),
             // winhttp.dll
-            0x198007FF => e[0x9] = (*next).dll_base,
+            0x198007FF => e[0x9] = load(i),
             // psapi.dll
-            0x914A0BCC => e[0xA] = (*next).dll_base,
+            0x914A0BCC => e[0xA] = load(i),
             // crypt32.dll
-            0xC38FCEAE => e[0xB] = (*next).dll_base,
+            0xC38FCEAE => e[0xB] = load(i),
             // dbhhelp.dll
-            0xB674F88D => e[0xC] = (*next).dll_base,
+            0xB674F88D => e[0xC] = load(i),
             // gpi32.dll
-            0x6C411560 => e[0xD] = (*next).dll_base,
+            0x6C411560 => e[0xD] = load(i),
             // wtsapi32.dll
-            0xEABBD160 => e[0xE] = (*next).dll_base,
+            0xEABBD160 => e[0xE] = load(i),
             // asmi.dll
-            0x9D8C6359 => e[0xF] = (*next).dll_base,
+            0x9D8C6359 => e[0xF] = load(i),
             _ => (),
         }
-        if (*next).f_link.is_null() || (*(*next).f_link).dll_base.is_invalid() {
-            break;
-        }
-        next = (*next).f_link;
     }
     // Load DLLs in a specific order so we can resolve references easily.
-    for i in 0..0x10 {
-        if e[i].0 == 0 {
+    for i in 0..e.len() {
+        if e[i].0 .0 == 0 {
             continue;
         }
         match i {
-            0x0 => super::ntdll::DLL.load_handle(true, e[i]),
-            0x1 => super::kernel32::KERNELBASE.load_handle(false, e[i]),
-            0x2 => super::kernel32::KERNEL32.load_handle(false, e[i]),
-            0x3 => super::advapi32::DLL.load_handle(false, e[i]),
-            0x4 => super::user32::DLL.load_handle(false, e[i]),
-            0x5 => super::userenv::DLL.load_handle(false, e[i]),
-            0x7 => super::iphlpapi::DLL.load_handle(false, e[i]),
-            0x8 => super::netapi32::DLL.load_handle(false, e[i]),
-            0x9 => super::winhttp::DLL.load_handle(false, e[i]),
-            0xA => super::psapi::DLL.load_handle(false, e[i]),
-            0xB => super::crypt32::DLL.load_handle(false, e[i]),
-            0xC => super::dbghelp::DLL.load_handle(false, e[i]),
-            0xD => super::gdi32::DLL.load_handle(false, e[i]),
-            0xE => super::wtsapi32::DLL.load_handle(false, e[i]),
-            0xF => super::amsi::DLL.load_handle(false, e[i]),
+            0x0 => super::ntdll::DLL.load_by_handle(true, e[i].0, e[i].1),
+            0x1 => super::kernel32::KERNELBASE.load_by_handle(false, e[i].0, e[i].1),
+            0x2 => super::kernel32::KERNEL32.load_by_handle(false, e[i].0, e[i].1),
+            0x3 => super::advapi32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0x4 => super::user32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0x5 => super::userenv::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0x7 => super::iphlpapi::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0x8 => super::netapi32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0x9 => super::winhttp::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xA => super::psapi::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xB => super::crypt32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xC => super::dbghelp::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xD => super::gdi32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xE => super::wtsapi32::DLL.load_by_handle(false, e[i].0, e[i].1),
+            0xF => super::amsi::DLL.load_by_handle(false, e[i].0, e[i].1),
             _ => (),
         }
+    }
+    bugtrack!("Mapper::init(): PEB Loading complete!")
+}
+#[inline]
+unsafe fn load(e: &mut LoaderEntry) -> (Handle, LoadType) {
+    // Load and increase load count so it won't get unloaded if the parent
+    // process frees it.
+    //
+    // Indictate and skip staticly linked DLLs.
+    if e.load_count == -1 {
+        (e.dll_base, LoadType::Linked)
+    } else {
+        bugtrack!("Mapper::load(): Increasing load_count for {:X}", e.dll_base);
+        e.load_count += 1;
+        (e.dll_base, LoadType::Dynamic)
     }
 }

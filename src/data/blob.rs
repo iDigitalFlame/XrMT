@@ -16,53 +16,123 @@
 
 #![no_implicit_prelude]
 
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Formatter};
-use core::mem::MaybeUninit;
+use core::mem::{replace, size_of, transmute, zeroed, MaybeUninit};
 use core::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
-use core::slice::Iter;
-use core::{cmp, mem, slice};
+use core::slice::{from_raw_parts, from_raw_parts_mut, from_ref, Iter};
+use core::{cmp, ptr};
 
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 pub struct Slice<T: Sized, const N: usize> {
     pub data: [T; N],
     pub len:  usize,
 }
-pub struct Blob<T: Copy, const N: usize = 256> {
+pub struct Blob<T: Copy, const N: usize = 256, A: Allocator = Global> {
     pos:   usize,
     swap:  bool,
-    heap:  MaybeUninit<Vec<T>>,
+    heap:  MaybeUninit<Vec<T, A>>,
+    alloc: A,
     stack: [MaybeUninit<T>; N],
 }
 
 impl<T: Copy, const N: usize> Blob<T, N> {
     #[inline]
     pub const fn new() -> Blob<T, N> {
+        Blob::new_in(Global)
+    }
+
+    #[inline]
+    pub fn with_capacity(size: usize) -> Blob<T, N> {
+        Blob::with_capacity_in(size, Global)
+    }
+
+    #[inline]
+    pub fn with_values(values: &[T]) -> Blob<T, N> {
+        values.into()
+    }
+    #[inline]
+    pub fn with_values_in<A: Allocator>(values: &[T], alloc: A) -> Blob<T, N, A> {
+        let mut b = Blob::with_capacity_in(values.len(), alloc);
+        b.extend_from_slice(values);
+        b
+    }
+}
+impl<T: Sized, const N: usize> Slice<T, N> {
+    #[inline]
+    pub const fn full(data: [T; N]) -> Slice<T, N> {
+        Slice { data, len: N }
+    }
+    #[inline]
+    pub const fn new(len: usize, data: [T; N]) -> Slice<T, N> {
+        Slice { data, len }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    #[inline]
+    pub fn as_slice(&self) -> &[T] {
+        &self.data[0..self.len]
+    }
+    #[inline]
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+    #[inline]
+    pub fn into_inner(self) -> [T; N] {
+        self.data
+    }
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut_ptr()
+    }
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data[0..self.len]
+    }
+}
+impl<T: Copy + Default, const N: usize> Blob<T, N> {
+    #[inline]
+    pub fn with_size(size: usize) -> Blob<T, N> {
+        Blob::with_size_in(size, Global)
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Blob<T, N, A> {
+    #[inline]
+    pub const fn new_in(alloc: A) -> Blob<T, N, A> {
         Blob {
-            pos:   0,
-            swap:  false,
-            heap:  MaybeUninit::uninit(),
+            pos: 0usize,
+            swap: false,
+            heap: MaybeUninit::uninit(),
+            alloc,
             stack: [MaybeUninit::uninit(); N],
         }
     }
 
     #[inline]
-    pub fn with_capacity(size: usize) -> Blob<T, N> {
+    pub fn with_capacity_in(size: usize, alloc: A) -> Blob<T, N, A> {
         if size > N {
             Blob {
-                pos:   0,
-                swap:  true,
-                heap:  MaybeUninit::new(Vec::with_capacity(size)),
+                pos: 0usize,
+                swap: true,
+                heap: MaybeUninit::new(Vec::with_capacity_in(size, unsafe { ptr::read(&alloc) })),
+                // SAFETY: ^ This is safe as the bottom alloc is never used.
                 stack: [MaybeUninit::uninit(); N],
+                alloc,
             }
         } else {
             Blob {
-                pos:   0,
-                swap:  false,
-                heap:  MaybeUninit::uninit(),
+                pos: 0usize,
+                swap: false,
+                heap: MaybeUninit::uninit(),
                 stack: [MaybeUninit::uninit(); N],
+                alloc,
             }
         }
     }
@@ -84,7 +154,7 @@ impl<T: Copy, const N: usize> Blob<T, N> {
         if self.swap {
             &(unsafe { &*self.heap.as_ptr() })[0..self.pos]
         } else {
-            unsafe { mem::transmute(&self.stack[0..self.pos]) }
+            unsafe { transmute(&self.stack[0..self.pos]) }
         }
     }
     #[inline]
@@ -135,7 +205,7 @@ impl<T: Copy, const N: usize> Blob<T, N> {
     }
     #[inline]
     pub fn len_as_bytes(&self) -> usize {
-        self.pos * mem::size_of::<T>()
+        self.pos * size_of::<T>()
     }
     #[inline]
     pub fn as_ptr_of<U>(&self) -> *const U {
@@ -154,11 +224,19 @@ impl<T: Copy, const N: usize> Blob<T, N> {
         unsafe { &*(self.as_ptr() as *const U) }
     }
     #[inline]
+    pub fn as_null_or_ptr(&self) -> *const T {
+        if self.is_empty() {
+            ptr::null()
+        } else {
+            self.as_ptr()
+        }
+    }
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         if self.swap {
             &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..self.pos]
         } else {
-            unsafe { mem::transmute(&mut self.stack[0..self.pos]) }
+            unsafe { transmute(&mut self.stack[0..self.pos]) }
         }
     }
     pub fn truncate(&mut self, new_size: usize) {
@@ -208,36 +286,36 @@ impl<T: Copy, const N: usize> Blob<T, N> {
 
     #[inline]
     pub unsafe fn as_slice_of<U: Sized>(&self) -> &[U] {
-        let (u, t) = (mem::size_of::<U>(), mem::size_of::<T>());
-        slice::from_raw_parts(
+        let (u, t) = (size_of::<U>(), size_of::<T>());
+        from_raw_parts(
             self.as_ptr() as *const U,
             if t > u { self.pos * t } else { self.pos / u },
         )
     }
     #[inline]
     pub unsafe fn write_item<U: Sized>(&mut self, v: U) {
-        let n = cmp::max(mem::size_of::<U>() / mem::size_of::<T>(), 1);
-        self.write_data(n, slice::from_raw_parts((&v as *const U) as *const T, n))
+        let n = cmp::max(size_of::<U>() / size_of::<T>(), 1);
+        self.write_data(n, from_raw_parts((&v as *const U) as *const T, n))
     }
     #[inline]
     pub unsafe fn write_item_ptr<U>(&mut self, size: usize, v: *const U) {
-        let n = cmp::max(size / mem::size_of::<T>(), 1);
-        self.write_data(n, slice::from_raw_parts(v as *const T, n))
+        let n = cmp::max(size / size_of::<T>(), 1);
+        self.write_data(n, from_raw_parts(v as *const T, n))
     }
     #[inline]
     pub unsafe fn read_item<U: Sized>(&self, pos: usize, v: &mut U) -> usize {
-        self.read_item_ptr(pos, mem::size_of::<T>(), v as *mut U)
+        self.read_item_ptr(pos, size_of::<T>(), v as *mut U)
     }
     pub unsafe fn read_item_ptr<U>(&self, pos: usize, len: usize, v: *mut U) -> usize {
         if pos > self.pos {
             return 0;
         }
-        let i = len / mem::size_of::<T>();
+        let i = len / size_of::<T>();
         let n = if pos + i > self.pos { self.pos - pos } else { i };
-        slice::from_raw_parts_mut(v as *mut T, n).copy_from_slice(if self.swap {
+        from_raw_parts_mut(v as *mut T, n).copy_from_slice(if self.swap {
             &(*self.heap.as_ptr())[pos..pos + n]
         } else {
-            mem::transmute(&self.stack[pos..pos + n])
+            transmute(&self.stack[pos..pos + n])
         });
         n
     }
@@ -248,8 +326,12 @@ impl<T: Copy, const N: usize> Blob<T, N> {
         }
         if !self.swap {
             self.heap
-                .write(Vec::with_capacity(N + new_size))
-                .extend_from_slice(unsafe { mem::transmute(&self.stack[0..self.pos]) });
+                .write(Vec::with_capacity_in(N + new_size, unsafe {
+                    // SAFETY: This is safe as alloc is never used again after this.
+                    // and is only used to create a Vec after being created.
+                    ptr::read(&self.alloc)
+                }))
+                .extend_from_slice(unsafe { transmute(&self.stack[0..self.pos]) });
             for i in 0..self.pos {
                 unsafe { self.stack[i].assume_init_drop() };
             }
@@ -269,58 +351,12 @@ impl<T: Copy, const N: usize> Blob<T, N> {
         self.pos += size;
     }
 }
-impl<T: Copy + Default, const N: usize> Blob<T, N> {
-    #[inline]
-    pub fn resize(&mut self, new_size: usize) {
-        self.resize_with(new_size, Default::default())
-    }
-    #[inline]
-    pub fn resize_as_bytes(&mut self, new_size: usize) {
-        self.resize_with(new_size * mem::size_of::<T>(), Default::default())
-    }
-}
-
-impl<T: Sized, const N: usize> Slice<T, N> {
-    #[inline]
-    pub const fn full(data: [T; N]) -> Slice<T, N> {
-        Slice { data, len: N }
-    }
-    #[inline]
-    pub const fn new(len: usize, data: [T; N]) -> Slice<T, N> {
-        Slice { data, len }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-    #[inline]
-    pub fn as_slice(&self) -> &[T] {
-        &self.data[0..self.len]
-    }
-    #[inline]
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ptr()
-    }
-    #[inline]
-    pub fn into_inner(self) -> [T; N] {
-        self.data
-    }
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.data.as_mut_ptr()
-    }
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data[0..self.len]
-    }
-}
 impl<T: Sized + Default + Copy, const N: usize> Slice<T, N> {
     #[inline]
     pub fn empty() -> Slice<T, N> {
         Slice {
             data: [Default::default(); N],
-            len:  0,
+            len:  0usize,
         }
     }
     #[inline]
@@ -331,56 +367,45 @@ impl<T: Sized + Default + Copy, const N: usize> Slice<T, N> {
         }
     }
 }
-
-impl<T: Copy, const N: usize> Drop for Blob<T, N> {
+impl<T: Copy, const N: usize, A: Allocator + Clone> Blob<T, N, A> {
     #[inline]
-    fn drop(&mut self) {
+    pub fn into_vec(mut self) -> Vec<T, A> {
         if self.swap {
-            unsafe { self.heap.assume_init_drop() }
-        } else {
-            for i in 0..self.pos {
-                unsafe { self.stack[i].assume_init_drop() }
+            unsafe {
+                replace(
+                    &mut *self.heap.as_mut_ptr(),
+                    Vec::new_in(self.alloc.clone()),
+                )
+                // ^ This is safe as we're dropping this after, so we just need
+                // to take out the Vec from the 'heap' attr.
             }
+        } else {
+            unsafe { transmute::<_, &[T]>(&self.stack[0..self.pos]) }.to_vec_in(self.alloc.clone())
         }
     }
 }
-impl<T: Copy, const N: usize> Clone for Blob<T, N> {
-    fn clone(&self) -> Blob<T, N> {
-        let mut v = Blob::with_capacity(self.pos);
-        v.extend_from_slice(self.as_slice());
-        v
+impl<T: Copy + Default, const N: usize, A: Allocator> Blob<T, N, A> {
+    #[inline]
+    pub fn with_size_in(size: usize, alloc: A) -> Blob<T, N, A> {
+        let mut b = Blob::with_capacity_in(size, alloc);
+        b.resize(size);
+        b
     }
-}
-impl<T: Copy, const N: usize> Deref for Blob<T, N> {
-    type Target = [T];
 
     #[inline]
-    fn deref(&self) -> &[T] {
-        self.as_slice()
+    pub fn resize(&mut self, new_size: usize) {
+        self.resize_with(new_size, Default::default())
+    }
+    #[inline]
+    pub fn resize_as_bytes(&mut self, new_size: usize) {
+        self.resize_with(new_size * size_of::<T>(), Default::default())
     }
 }
+
 impl<T: Copy, const N: usize> Default for Blob<T, N> {
     #[inline]
     fn default() -> Blob<T, N> {
         Blob::new()
-    }
-}
-impl<T: Copy, const N: usize> DerefMut for Blob<T, N> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [T] {
-        self.as_mut_slice()
-    }
-}
-impl<T: Copy, const N: usize> Extend<T> for Blob<T, N> {
-    #[inline]
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        let x = iter.into_iter();
-        if let Some(n) = x.size_hint().1 {
-            self.reserve(n);
-        }
-        for i in x {
-            self.push(i)
-        }
     }
 }
 impl<T: Copy, const N: usize> From<&[T]> for Blob<T, N> {
@@ -391,57 +416,12 @@ impl<T: Copy, const N: usize> From<&[T]> for Blob<T, N> {
         b
     }
 }
-impl<T: Copy, const N: usize> AsRef<[T]> for Blob<T, N> {
-    #[inline]
-    fn as_ref(&self) -> &[T] {
-        self.as_slice()
-    }
-}
-impl<T: Copy, const N: usize> Borrow<[T]> for Blob<T, N> {
-    #[inline]
-    fn borrow(&self) -> &[T] {
-        self.as_slice()
-    }
-}
-impl<T: Copy, const N: usize> Index<usize> for Blob<T, N> {
-    type Output = T;
-
-    #[inline]
-    fn index(&self, index: usize) -> &T {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[index]
-        } else {
-            unsafe { self.stack[index].assume_init_ref() }
-        }
-    }
-}
-impl<T: Copy + Debug, const N: usize> Debug for Blob<T, N> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(self.as_slice(), f)
-    }
-}
-impl<T: Copy, const N: usize> BorrowMut<[T]> for Blob<T, N> {
-    #[inline]
-    fn borrow_mut(&mut self) -> &mut [T] {
-        self.as_mut_slice()
-    }
-}
 impl<T: Copy, const N: usize> From<&mut [T]> for Blob<T, N> {
     #[inline]
     fn from(v: &mut [T]) -> Blob<T, N> {
         let mut b = Blob::with_capacity(v.len());
         b.write_data(v.len(), v);
         b
-    }
-}
-impl<T: Copy, const N: usize> IndexMut<usize> for Blob<T, N> {
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut T {
-        if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index]
-        } else {
-            unsafe { self.stack[index].assume_init_mut() }
-        }
     }
 }
 impl<T: Copy, const N: usize> FromIterator<T> for Blob<T, N> {
@@ -458,83 +438,24 @@ impl<T: Copy, const N: usize> FromIterator<T> for Blob<T, N> {
         b
     }
 }
-impl<T: Copy, const N: usize> Index<RangeFull> for Blob<T, N> {
-    type Output = [T];
+impl<T: Copy, const N: usize, A: Allocator> Drop for Blob<T, N, A> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.swap {
+            unsafe { self.heap.assume_init_drop() }
+        } else {
+            for i in 0..self.pos {
+                unsafe { self.stack[i].assume_init_drop() }
+            }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Deref for Blob<T, N, A> {
+    type Target = [T];
 
     #[inline]
-    fn index(&self, _index: RangeFull) -> &[T] {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[0..self.pos]
-        } else {
-            unsafe { mem::transmute(&self.stack[0..self.pos]) }
-        }
-    }
-}
-impl<T: Copy, const N: usize> AsMut<Blob<T, N>> for Blob<T, N> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut Blob<T, N> {
-        self
-    }
-}
-impl<'a, T: Copy, const N: usize> Extend<&'a T> for Blob<T, N> {
-    #[inline]
-    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
-        for i in iter {
-            self.write_data(1, slice::from_ref(i))
-        }
-    }
-}
-impl<T: Copy, const N: usize> Index<Range<usize>> for Blob<T, N> {
-    type Output = [T];
-
-    #[inline]
-    fn index(&self, index: Range<usize>) -> &[T] {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[index]
-        } else {
-            unsafe { mem::transmute(&self.stack[index]) }
-        }
-    }
-}
-impl<T: Copy, const N: usize> IndexMut<RangeFull> for Blob<T, N> {
-    #[inline]
-    fn index_mut(&mut self, _index: RangeFull) -> &mut [T] {
-        if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..self.pos]
-        } else {
-            unsafe { mem::transmute(&mut self.stack[0..self.pos]) }
-        }
-    }
-}
-impl<'a, T: Copy, const N: usize> IntoIterator for &'a Blob<T, N> {
-    type Item = &'a T;
-    type IntoIter = Iter<'a, T>;
-
-    #[inline]
-    fn into_iter(self) -> Iter<'a, T> {
-        self.as_slice().into_iter()
-    }
-}
-impl<T: Copy, const N: usize> Index<RangeTo<usize>> for Blob<T, N> {
-    type Output = [T];
-
-    #[inline]
-    fn index(&self, index: RangeTo<usize>) -> &[T] {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[0..index.end]
-        } else {
-            unsafe { mem::transmute(&self.stack[0..index.end]) }
-        }
-    }
-}
-impl<T: Copy, const N: usize> IndexMut<Range<usize>> for Blob<T, N> {
-    #[inline]
-    fn index_mut(&mut self, index: Range<usize>) -> &mut [T] {
-        if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index]
-        } else {
-            unsafe { mem::transmute(&mut self.stack[index]) }
-        }
+    fn deref(&self) -> &[T] {
+        self.as_slice()
     }
 }
 impl<'a, T: Copy, const N: usize> FromIterator<&'a T> for Blob<T, N> {
@@ -551,36 +472,34 @@ impl<'a, T: Copy, const N: usize> FromIterator<&'a T> for Blob<T, N> {
         b
     }
 }
-impl<T: Copy, const N: usize> Index<RangeFrom<usize>> for Blob<T, N> {
-    type Output = [T];
-
+impl<T: Copy, const N: usize, A: Allocator> DerefMut for Blob<T, N, A> {
     #[inline]
-    fn index(&self, index: RangeFrom<usize>) -> &[T] {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[index.start..self.pos]
-        } else {
-            unsafe { mem::transmute(&self.stack[index.start..self.pos]) }
+    fn deref_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Extend<T> for Blob<T, N, A> {
+    #[inline]
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let x = iter.into_iter();
+        if let Some(n) = x.size_hint().1 {
+            self.reserve(n);
+        }
+        for i in x {
+            self.push(i)
         }
     }
 }
-impl<T: Copy, const N: usize> IndexMut<RangeTo<usize>> for Blob<T, N> {
+impl<T: Copy, const N: usize, A: Allocator> AsRef<[T]> for Blob<T, N, A> {
     #[inline]
-    fn index_mut(&mut self, index: RangeTo<usize>) -> &mut [T] {
-        if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..index.end]
-        } else {
-            unsafe { mem::transmute(&mut self.stack[0..index.end]) }
-        }
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
     }
 }
-impl<T: Copy, const N: usize> IndexMut<RangeFrom<usize>> for Blob<T, N> {
+impl<T: Copy, const N: usize, A: Allocator> Borrow<[T]> for Blob<T, N, A> {
     #[inline]
-    fn index_mut(&mut self, index: RangeFrom<usize>) -> &mut [T] {
-        if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index.start..self.pos]
-        } else {
-            unsafe { mem::transmute(&mut self.stack[index.start..self.pos]) }
-        }
+    fn borrow(&self) -> &[T] {
+        self.as_slice()
     }
 }
 impl<T: Copy, const N: usize, const X: usize> From<[T; X]> for Blob<T, N> {
@@ -591,47 +510,146 @@ impl<T: Copy, const N: usize, const X: usize> From<[T; X]> for Blob<T, N> {
         b
     }
 }
-impl<T: Copy, const N: usize> Index<RangeInclusive<usize>> for Blob<T, N> {
-    type Output = [T];
+impl<T: Copy, const N: usize, A: Allocator> Index<usize> for Blob<T, N, A> {
+    type Output = T;
 
     #[inline]
-    fn index(&self, index: RangeInclusive<usize>) -> &[T] {
+    fn index(&self, index: usize) -> &T {
         if self.swap {
             &(unsafe { &*self.heap.as_ptr() })[index]
         } else {
-            unsafe { mem::transmute(&self.stack[index]) }
+            unsafe { self.stack[index].assume_init_ref() }
         }
     }
 }
-impl<T: Copy, const N: usize> Index<RangeToInclusive<usize>> for Blob<T, N> {
-    type Output = [T];
-
+impl<T: Copy + Debug, const N: usize, A: Allocator> Debug for Blob<T, N, A> {
     #[inline]
-    fn index(&self, index: RangeToInclusive<usize>) -> &[T] {
-        if self.swap {
-            &(unsafe { &*self.heap.as_ptr() })[0..=index.end]
-        } else {
-            unsafe { mem::transmute(&self.stack[0..=index.end]) }
-        }
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.as_slice(), f)
     }
 }
-impl<T: Copy, const N: usize> IndexMut<RangeInclusive<usize>> for Blob<T, N> {
+impl<T: Copy, const N: usize, A: Allocator> BorrowMut<[T]> for Blob<T, N, A> {
     #[inline]
-    fn index_mut(&mut self, index: RangeInclusive<usize>) -> &mut [T] {
+    fn borrow_mut(&mut self) -> &mut [T] {
+        self.as_mut_slice()
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<usize> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut T {
         if self.swap {
             &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index]
         } else {
-            unsafe { mem::transmute(&mut self.stack[index]) }
+            unsafe { self.stack[index].assume_init_mut() }
         }
     }
 }
-impl<T: Copy, const N: usize> IndexMut<RangeToInclusive<usize>> for Blob<T, N> {
+impl<T: Copy, const N: usize, A: Allocator> Index<RangeFull> for Blob<T, N, A> {
+    type Output = [T];
+
     #[inline]
-    fn index_mut(&mut self, index: RangeToInclusive<usize>) -> &mut [T] {
+    fn index(&self, _index: RangeFull) -> &[T] {
         if self.swap {
-            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..=index.end]
+            &(unsafe { &*self.heap.as_ptr() })[0..self.pos]
         } else {
-            unsafe { mem::transmute(&mut self.stack[0..=index.end]) }
+            unsafe { transmute(&self.stack[0..self.pos]) }
+        }
+    }
+}
+impl<'a, T: Copy, const N: usize, A: Allocator> Extend<&'a T> for Blob<T, N, A> {
+    #[inline]
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        for i in iter {
+            self.write_data(1, from_ref(i))
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Index<Range<usize>> for Blob<T, N, A> {
+    type Output = [T];
+
+    #[inline]
+    fn index(&self, index: Range<usize>) -> &[T] {
+        if self.swap {
+            &(unsafe { &*self.heap.as_ptr() })[index]
+        } else {
+            unsafe { transmute(&self.stack[index]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<RangeFull> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, _index: RangeFull) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..self.pos]
+        } else {
+            unsafe { transmute(&mut self.stack[0..self.pos]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator + Copy + Clone> Clone for Blob<T, N, A> {
+    #[inline]
+    fn clone(&self) -> Blob<T, N, A> {
+        let mut v = Blob::with_capacity_in(self.pos, self.alloc.clone());
+        v.extend_from_slice(self.as_slice());
+        v
+    }
+}
+impl<'a, T: Copy, const N: usize, A: Allocator> IntoIterator for &'a Blob<T, N, A> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Iter<'a, T> {
+        self.as_slice().into_iter()
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> AsMut<Blob<T, N, A>> for Blob<T, N, A> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut Blob<T, N, A> {
+        self
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Index<RangeTo<usize>> for Blob<T, N, A> {
+    type Output = [T];
+
+    #[inline]
+    fn index(&self, index: RangeTo<usize>) -> &[T] {
+        if self.swap {
+            &(unsafe { &*self.heap.as_ptr() })[0..index.end]
+        } else {
+            unsafe { transmute(&self.stack[0..index.end]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<Range<usize>> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: Range<usize>) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index]
+        } else {
+            unsafe { transmute(&mut self.stack[index]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Index<RangeFrom<usize>> for Blob<T, N, A> {
+    type Output = [T];
+
+    #[inline]
+    fn index(&self, index: RangeFrom<usize>) -> &[T] {
+        if self.swap {
+            &(unsafe { &*self.heap.as_ptr() })[index.start..self.pos]
+        } else {
+            unsafe { transmute(&self.stack[index.start..self.pos]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<RangeTo<usize>> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: RangeTo<usize>) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..index.end]
+        } else {
+            unsafe { transmute(&mut self.stack[0..index.end]) }
         }
     }
 }
@@ -643,14 +661,75 @@ impl<T: Sized + Copy, const N: usize, const X: usize> From<Slice<T, X>> for Blob
         b
     }
 }
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<RangeFrom<usize>> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: RangeFrom<usize>) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index.start..self.pos]
+        } else {
+            unsafe { transmute(&mut self.stack[index.start..self.pos]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Index<RangeInclusive<usize>> for Blob<T, N, A> {
+    type Output = [T];
 
-impl<const N: usize> Blob<u8, N> {
+    #[inline]
+    fn index(&self, index: RangeInclusive<usize>) -> &[T] {
+        if self.swap {
+            &(unsafe { &*self.heap.as_ptr() })[index]
+        } else {
+            unsafe { transmute(&self.stack[index]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> Index<RangeToInclusive<usize>> for Blob<T, N, A> {
+    type Output = [T];
+
+    #[inline]
+    fn index(&self, index: RangeToInclusive<usize>) -> &[T] {
+        if self.swap {
+            &(unsafe { &*self.heap.as_ptr() })[0..=index.end]
+        } else {
+            unsafe { transmute(&self.stack[0..=index.end]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<RangeInclusive<usize>> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: RangeInclusive<usize>) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[index]
+        } else {
+            unsafe { transmute(&mut self.stack[index]) }
+        }
+    }
+}
+impl<T: Copy, const N: usize, A: Allocator> IndexMut<RangeToInclusive<usize>> for Blob<T, N, A> {
+    #[inline]
+    fn index_mut(&mut self, index: RangeToInclusive<usize>) -> &mut [T] {
+        if self.swap {
+            &mut (unsafe { &mut *self.heap.as_mut_ptr() })[0..=index.end]
+        } else {
+            unsafe { transmute(&mut self.stack[0..=index.end]) }
+        }
+    }
+}
+
+impl<const N: usize, A: Allocator> Blob<u8, N, A> {
     #[inline]
     pub fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(self.as_slice()) }
     }
+    #[inline]
+    pub fn as_null_str(&self) -> &str {
+        match self.iter().position(|v| *v == 0) {
+            Some(i) => unsafe { core::str::from_utf8_unchecked(&self.as_slice()[..i]) },
+            None => unsafe { core::str::from_utf8_unchecked(self.as_slice()) },
+        }
+    }
 }
-impl<const N: usize> ToString for Blob<u8, N> {
+impl<const N: usize, A: Allocator> ToString for Blob<u8, N, A> {
     #[inline]
     fn to_string(&self) -> String {
         self.as_str().to_string()
@@ -848,7 +927,7 @@ impl<T: Sized + Copy, const N: usize, const X: usize> From<Blob<T, X>> for Slice
     fn from(v: Blob<T, X>) -> Slice<T, N> {
         let mut s = Slice {
             len:  cmp::min(v.len(), N),
-            data: unsafe { mem::zeroed() },
+            data: unsafe { zeroed() },
         };
         match v.len().cmp(&N) {
             Ordering::Equal => s.data.copy_from_slice(&v),

@@ -15,19 +15,96 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
 use core::{cmp, ptr};
 
 use crate::data::blob::{Blob, Slice};
+use crate::data::str::MaybeString;
 use crate::device::winapi::loader::advapi32;
 use crate::device::winapi::registry::{Key, OwnedKey};
-use crate::device::winapi::{self, AsHandle, DecodeUtf16, Handle, MaybeString, ProcessInfo, RegKeyBasicInfo, RegKeyInfo, RegKeyValueFullInfo, SecAttrs, StartInfo, TokenUser, WChars, Win32Error, Win32Result};
+use crate::device::winapi::{self, AsHandle, DecodeUtf16, Handle, LsaAccountDomainInfo, LsaAttributes, OwnedHandle, ProcessInfo, RegKeyBasicInfo, RegKeyInfo, RegKeyValueFullInfo, SecAttrs, StartInfo, UnicodeString, WChars, Win32Error, Win32Result, SID};
+use crate::prelude::*;
 use crate::util::crypt;
-use crate::util::stx::prelude::*;
 
-const HKEY_ROOT: Key = Key(Handle(0));
+const HKEY_ROOT: Key = Key(Handle(0usize));
+
+pub fn local_system_sid() -> Win32Result<String> {
+    winapi::init_advapi32();
+    let mut h = Handle::default();
+    // 0x1 - PolicyInformation
+    let r = unsafe {
+        let v = LsaAttributes::default();
+        winapi::syscall!(
+            *advapi32::LsaOpenPolicy,
+            extern "stdcall" fn(*const UnicodeString, *const LsaAttributes, u32, &mut Handle) -> u32,
+            ptr::null(),
+            &v,
+            0x1,
+            &mut h
+        )
+    };
+    if r > 0 {
+        return Err(Win32Error::from_code(r));
+    }
+    let mut i: *mut LsaAccountDomainInfo = ptr::null_mut();
+    let r = unsafe {
+        // 0x5 - PolicyAccountDomainInformation
+        let s = winapi::syscall!(
+            *advapi32::LsaQueryInformationPolicy,
+            extern "stdcall" fn(Handle, u32, *mut *mut LsaAccountDomainInfo) -> u32,
+            h,
+            0x5,
+            &mut i
+        );
+        winapi::syscall!(*advapi32::LsaClose, extern "stdcall" fn(Handle) -> u32, h);
+        if s > 0 {
+            Err(Win32Error::from_code(r))
+        } else {
+            Ok((*i).sid.to_string())
+        }
+    };
+    winapi::LocalFree(i);
+    r
+}
+pub fn username_from_sid(sid: &SID) -> Win32Result<String> {
+    winapi::init_advapi32();
+    let (mut c, mut x, mut t) = (64u32, 64u32, 0u32);
+    let mut n = Blob::<u16, 256>::with_capacity(c as usize);
+    let mut d = Blob::<u16, 256>::with_capacity(x as usize);
+    let func = unsafe {
+        winapi::make_syscall!(
+            *advapi32::LookupAccountSid,
+            extern "stdcall" fn(*const u16, *const SID, *mut u16, *mut u32, *mut u16, *mut u32, *mut u32) -> u32
+        )
+    };
+    loop {
+        n.resize(c as usize * 2);
+        d.resize(x as usize * 2);
+        let r = func(
+            ptr::null(),
+            sid,
+            n.as_mut_ptr(),
+            &mut c,
+            d.as_mut_ptr(),
+            &mut x,
+            &mut t,
+        );
+        match r {
+            // 0x7A - ERROR_INSUFFICIENT_BUFFER
+            0x7A => (),
+            _ if x > 0 => {
+                d.truncate(x as usize);
+                d.push(b'\\' as u16);
+                d.extend_from_slice(&n[0..c as usize]);
+                return Ok((&d[0..(c + x) as usize + 1]).decode_utf16());
+            },
+            _ if x == 0 => return Ok((&n[0..c as usize]).decode_utf16()),
+            _ => return Err(winapi::last_error()),
+        }
+    }
+}
 
 pub fn RtlGenRandom(buf: &mut [u8]) -> Win32Result<usize> {
     if winapi::is_min_windows_7() {
@@ -39,7 +116,7 @@ pub fn RtlGenRandom(buf: &mut [u8]) -> Win32Result<usize> {
         //            way of doing it instead.
         let r = winapi::NtCreateFile(
             crypt::get_or(0, r"\Device\CNG"),
-            winapi::INVALID,
+            Handle::INVALID,
             0x100001, // SYNCHRONIZE | FILE_READ_DATA
             None,
             0,
@@ -55,7 +132,7 @@ pub fn RtlGenRandom(buf: &mut [u8]) -> Win32Result<usize> {
                 ptr::null() as *const usize,
                 0,
                 buf.as_mut_ptr(),
-                cmp::min(buf.len(), u32::MAX as usize) as u32,
+                cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             )
         });
         if let Ok(n) = r {
@@ -68,7 +145,7 @@ pub fn RtlGenRandom(buf: &mut [u8]) -> Win32Result<usize> {
             *advapi32::SystemFunction036,
             extern "stdcall" fn(*mut u8, u32) -> u32,
             buf.as_mut_ptr(),
-            cmp::min(buf.len(), u32::MAX as usize) as u32
+            cmp::min(buf.len(), 0xFFFFFFFF) as u32
         )
     };
     if r == 0 {
@@ -99,23 +176,23 @@ pub fn RegCloseKey(key: Key) -> Win32Result<()> {
 #[inline]
 pub fn RegGetKeyNames(key: Key) -> Win32Result<Vec<String>> {
     if !key.is_predefined() {
-        get_key_names(key)
+        key_names(key)
     } else if key.is_class_root() {
         // 0x8 - KEY_ENUMERATE_SUB_KEYS
-        get_key_names(*map_class_root(0x8, None)?)
+        key_names(*map_class_root(0x8, None)?)
     } else {
-        get_key_names(*map_predefined_root(key)?)
+        key_names(*map_predefined_root(key)?)
     }
 }
 #[inline]
 pub fn RegGetValueNames(key: Key) -> Win32Result<Vec<String>> {
     if !key.is_predefined() {
-        get_value_names(key)
+        value_names(key)
     } else if key.is_class_root() {
         // 0x1 - KEY_QUERY_VALUE
-        get_value_names(*map_class_root(0x1, None)?)
+        value_names(*map_class_root(0x1, None)?)
     } else {
-        get_value_names(*map_predefined_root(key)?)
+        value_names(*map_predefined_root(key)?)
     }
 }
 #[inline]
@@ -250,6 +327,31 @@ pub fn RegCreateKeyEx(key: Key, subkey: impl AsRef<str>, class: impl MaybeString
     }
 }
 
+pub fn LoginUser<U: AsRef<str>, M: MaybeString>(user: U, domain: M, password: M, login_type: u32, provider: u32) -> Win32Result<OwnedHandle> {
+    winapi::init_advapi32();
+    let n: WChars = user.as_ref().into();
+    let d: WChars = domain.into_string().into();
+    let p: WChars = password.into_string().into();
+    let mut h = Handle::default();
+    let r = unsafe {
+        winapi::syscall!(
+            *advapi32::LogonUser,
+            extern "stdcall" fn(*const u16, *const u16, *const u16, u32, u32, *mut Handle) -> u32,
+            n.as_ptr(),
+            d.as_null_or_ptr(),
+            p.as_null_or_ptr(),
+            login_type,
+            provider,
+            &mut h
+        )
+    };
+    if r == 0 {
+        Err(winapi::last_error())
+    } else {
+        Ok(h.into())
+    }
+}
+
 pub fn CreateProcessWithToken<T: AsRef<str>, E: AsRef<str>, M: MaybeString>(token: impl AsHandle, login_flags: u32, name: T, cmd: T, flags: u32, env_split: bool, env: &[E], dir: M, start: StartInfo) -> Win32Result<ProcessInfo> {
     if winapi::is_windows_xp() {
         return Err(Win32Error::NotImplemented);
@@ -273,7 +375,7 @@ pub fn CreateProcessWithToken<T: AsRef<str>, E: AsRef<str>, M: MaybeString>(toke
             c.as_ptr(),
             f,
             e.as_ptr(),
-            if d.is_empty() { ptr::null() } else { d.as_ptr() },
+            d.as_null_or_ptr(),
             start.as_ptr(),
             &mut i
         )
@@ -302,14 +404,14 @@ pub fn CreateProcessWithLogon<T: AsRef<str>, E: AsRef<str>, U: AsRef<str>, M: Ma
             *advapi32::CreateProcessWithLogon,
             extern "stdcall" fn(*const u16, *const u16, *const u16, u32, *const u16, *const u16, u32, *const u16, *const u16, *const usize, *mut ProcessInfo) -> u32,
             u.as_ptr(),
-            if m.is_empty() { ptr::null() } else { m.as_ptr() },
-            if p.is_empty() { ptr::null() } else { p.as_ptr() },
+            m.as_null_or_ptr(),
+            p.as_null_or_ptr(),
             login_flags,
             n.as_ptr(),
             c.as_ptr(),
             f,
             e.as_ptr(),
-            if d.is_empty() { ptr::null() } else { d.as_ptr() },
+            d.as_null_or_ptr(),
             start.as_ptr(),
             &mut i
         )
@@ -321,12 +423,30 @@ pub fn CreateProcessWithLogon<T: AsRef<str>, E: AsRef<str>, U: AsRef<str>, M: Ma
     }
 }
 
+fn key_names(key: Key) -> Win32Result<Vec<String>> {
+    let i = winapi::NtQueryKeyInfo(key)?;
+    let mut n = Vec::with_capacity(i.subkeys as usize);
+    for x in 0..i.values {
+        if let Some(v) = winapi::NtEnumerateKey(key, x)? {
+            n.push(v.to_string())
+        }
+    }
+    Ok(n)
+}
+fn value_names(key: Key) -> Win32Result<Vec<String>> {
+    let i = winapi::NtQueryKeyInfo(key)?;
+    let mut n = Vec::with_capacity(i.values as usize);
+    for x in 0..i.values {
+        if let Some(v) = winapi::NtEnumerateValueKey(key, x, None)? {
+            n.push(v.to_string())
+        }
+    }
+    Ok(n)
+}
 #[inline]
 fn current_user_sid() -> Win32Result<Slice<u8, 256>> {
     // 0x8 - TOKEN_QUERY
-    let t = winapi::current_token(0x8)?;
-    let mut buf = Blob::new();
-    TokenUser::from_token(t, &mut buf)?.user.sid.to_slice()
+    winapi::token_info(winapi::current_token(0x8)?, |u| Ok(u.user.sid.to_slice()))
 }
 fn map_del_subkey_values(key: Key) -> Win32Result<()> {
     // Get count of subkeys/values.
@@ -355,26 +475,6 @@ fn map_del_subkey_values(key: Key) -> Win32Result<()> {
     }
     // Ask to delete outselves, the outer function will close our handle.
     winapi::NtDeleteKey(key)
-}
-fn get_key_names(key: Key) -> Win32Result<Vec<String>> {
-    let i = winapi::NtQueryKeyInfo(key)?;
-    let mut n = Vec::with_capacity(i.subkeys as usize);
-    for x in 0..i.values {
-        if let Some(v) = winapi::NtEnumerateKey(key, x)? {
-            n.push(v.to_string())
-        }
-    }
-    Ok(n)
-}
-fn get_value_names(key: Key) -> Win32Result<Vec<String>> {
-    let i = winapi::NtQueryKeyInfo(key)?;
-    let mut n = Vec::with_capacity(i.values as usize);
-    for x in 0..i.values {
-        if let Some(v) = winapi::NtEnumerateValueKey(key, x, None)? {
-            n.push(v.to_string())
-        }
-    }
-    Ok(n)
 }
 fn map_predefined_root(root: Key) -> Win32Result<OwnedKey> {
     let n = match root.0 .0 & 0xFFFFFFF {

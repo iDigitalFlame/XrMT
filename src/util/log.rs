@@ -16,9 +16,15 @@
 
 #![no_implicit_prelude]
 
+#[cfg(all(feature = "bugs", feature = "strip"))]
+compile_error!("Cannot use 'bugs' and 'strip' at the same time!");
+
+use core::cmp::Ordering;
+
 pub use inner::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+use crate::prelude::*;
+
 #[repr(u8)]
 pub enum Level {
     Trace   = 0,
@@ -29,12 +35,41 @@ pub enum Level {
     Fatal   = 5,
 }
 
+impl Eq for Level {}
+impl Ord for Level {
+    #[inline]
+    fn cmp(&self, other: &Level) -> Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+impl Copy for Level {}
+impl Clone for Level {
+    #[inline]
+    fn clone(&self) -> Level {
+        *self
+    }
+}
+impl PartialEq for Level {
+    #[inline]
+    fn eq(&self, other: &Level) -> bool {
+        *self as u8 == *other as u8
+    }
+}
+impl PartialOrd for Level {
+    #[inline]
+    fn partial_cmp(&self, other: &Level) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub mod prelude {
     pub use crate::{debug, error, fatal, info, trace, warning};
 }
 
-#[cfg(feature = "implant")]
+#[cfg(feature = "strip")]
 mod inner {
+    use crate::prelude::*;
+
     #[macro_export]
     macro_rules! info {
         ($dst:expr, $($arg:tt)*) => {{}};
@@ -60,24 +95,67 @@ mod inner {
         ($dst:expr, $($arg:tt)*) => {{}};
     }
 
-    pub struct Log {}
+    pub enum Logger {
+        None,
+    }
+
+    pub struct Log;
+    pub struct RefLog;
+    pub struct ThreadLog;
+
+    impl ThreadLog {
+        #[inline]
+        pub fn new_ref(&self) -> RefLog {
+            RefLog
+        }
+    }
+
+    impl Clone for RefLog {
+        #[inline]
+        fn clone(&self) -> RefLog {
+            RefLog
+        }
+    }
+
+    impl Clone for ThreadLog {
+        #[inline]
+        fn clone(&self) -> ThreadLog {
+            ThreadLog
+        }
+    }
+    impl From<Log> for ThreadLog {
+        #[inline]
+        fn from(_v: Log) -> ThreadLog {
+            ThreadLog
+        }
+    }
+
+    unsafe impl Sync for Log {}
+    unsafe impl Send for Log {}
+
+    #[inline]
+    pub fn none() -> Logger {
+        Logger::None
+    }
 }
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod inner {
-    pub(super) const NEWLINE: [u8; 1] = [b'\n'];
+    const NEWLINE: [u8; 1] = [b'\n'];
 
     use alloc::borrow::Cow;
-    use alloc::boxed::Box;
+    use alloc::sync::{Arc, Weak};
     use core::cell::UnsafeCell;
     use core::fmt::{self, Arguments, Debug, Display};
-    use core::mem::MaybeUninit;
+    use core::matches;
 
-    use super::Level;
     use crate::data::time::Time;
-    use crate::device::fs::{File, OpenOptions};
-    use crate::util::stx::ffi::Path;
-    use crate::util::stx::io::{self, Error, ErrorKind, Stderr, Write};
-    use crate::util::stx::prelude::*;
+    use crate::fs::{File, OpenOptions};
+    use crate::ignore_error;
+    use crate::io::{self, Error, ErrorKind, Stderr, Write};
+    use crate::path::Path;
+    use crate::prelude::*;
+    use crate::sync::Mutex;
+    use crate::util::log::Level;
 
     #[macro_export]
     macro_rules! info {
@@ -117,8 +195,9 @@ mod inner {
     }
 
     pub enum Logger {
-        Console(Stderr),
+        None,
         File(File),
+        Console(Stderr),
         Writer(Box<dyn Write>),
         Multiple(Box<MultiLog>),
     }
@@ -128,24 +207,62 @@ mod inner {
         prefix: Option<String>,
         w:      UnsafeCell<Logger>,
     }
-    pub struct MultiLog {
-        count: u8,
-        inner: [MaybeUninit<UnsafeCell<Logger>>; 5],
-    }
+    pub struct MultiLog([Logger; 5]);
+    pub struct RefLog(Weak<Mutex<Log>>);
+    pub struct ThreadLog(Arc<Mutex<Log>>);
 
     pub trait MaybeLog {
-        fn info(&self, v: &str);
-        fn debug(&self, v: &str);
-        fn trace(&self, v: &str);
-        fn error(&self, v: &str);
-        fn fatal(&self, v: &str);
-        fn warning(&self, v: &str);
-        fn info_fmt(&self, args: Arguments<'_>);
-        fn debug_fmt(&self, args: Arguments<'_>);
-        fn trace_fmt(&self, args: Arguments<'_>);
-        fn error_fmt(&self, args: Arguments<'_>);
-        fn fatal_fmt(&self, args: Arguments<'_>);
-        fn warning_fmt(&self, args: Arguments<'_>);
+        fn log(&self, level: Level, v: &str);
+        fn log_fmt(&self, level: Level, args: Arguments<'_>);
+
+        #[inline]
+        fn info(&self, v: &str) {
+            self.log(Level::Info, v)
+        }
+        #[inline]
+        fn debug(&self, v: &str) {
+            self.log(Level::Debug, v)
+        }
+        #[inline]
+        fn trace(&self, v: &str) {
+            self.log(Level::Trace, v)
+        }
+        #[inline]
+        fn error(&self, v: &str) {
+            self.log(Level::Error, v)
+        }
+        #[inline]
+        fn fatal(&self, v: &str) {
+            self.log(Level::Fatal, v)
+        }
+        #[inline]
+        fn warning(&self, v: &str) {
+            self.log(Level::Warning, v)
+        }
+        #[inline]
+        fn info_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Info, args)
+        }
+        #[inline]
+        fn debug_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Debug, args)
+        }
+        #[inline]
+        fn trace_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Trace, args)
+        }
+        #[inline]
+        fn error_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Error, args)
+        }
+        #[inline]
+        fn fatal_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Fatal, args)
+        }
+        #[inline]
+        fn warning_fmt(&self, args: Arguments<'_>) {
+            self.log_fmt(Level::Warning, args)
+        }
     }
     pub trait MaybePrefix {
         fn into_prefix(self) -> Option<String>;
@@ -162,32 +279,8 @@ mod inner {
         }
 
         #[inline]
-        pub fn info(&self, v: &str) {
-            self.log(Level::Info, v)
-        }
-        #[inline]
-        pub fn debug(&self, v: &str) {
-            self.log(Level::Debug, v)
-        }
-        #[inline]
-        pub fn trace(&self, v: &str) {
-            self.log(Level::Trace, v)
-        }
-        #[inline]
-        pub fn error(&self, v: &str) {
-            self.log(Level::Error, v)
-        }
-        #[inline]
-        pub fn fatal(&self, v: &str) {
-            self.log(Level::Fatal, v)
-        }
-        #[inline]
         pub fn level(&self) -> Level {
             self.level
-        }
-        #[inline]
-        pub fn warning(&self, v: &str) {
-            self.log(Level::Warning, v)
         }
         #[inline]
         pub fn prefix(&self) -> Option<&str> {
@@ -198,34 +291,45 @@ mod inner {
             self.level = level
         }
         #[inline]
-        pub fn info_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Info, args)
-        }
-        #[inline]
-        pub fn debug_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Debug, args)
-        }
-        #[inline]
-        pub fn trace_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Trace, args)
-        }
-        #[inline]
-        pub fn error_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Error, args)
-        }
-        #[inline]
-        pub fn fatal_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Fatal, args)
-        }
-        #[inline]
-        pub fn warning_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Warning, args)
-        }
-        #[inline]
         pub fn set_prefix(&mut self, prefix: impl MaybePrefix) {
             self.prefix = prefix.into_prefix()
         }
+    }
+    impl Logger {
+        #[inline]
+        fn is_none(&self) -> bool {
+            matches!(self, Logger::None)
+        }
+    }
+    impl MultiLog {
+        #[inline]
+        pub fn new() -> MultiLog {
+            MultiLog([Logger::None, Logger::None, Logger::None, Logger::None, Logger::None])
+        }
 
+        #[inline]
+        pub fn len(&self) -> usize {
+            self.0.iter().position(|v| v.is_none()).unwrap_or_else(|| self.0.len())
+        }
+        #[inline]
+        pub fn add(&mut self, w: Logger) -> io::Result<()> {
+            for i in 0..self.0.len() {
+                if self.0[i].is_none() {
+                    self.0[i] = w;
+                    return Ok(());
+                }
+            }
+            return Err(ErrorKind::TooManyLinks.into());
+        }
+    }
+    impl ThreadLog {
+        #[inline]
+        pub fn new_ref(&self) -> RefLog {
+            RefLog(Arc::downgrade(&self.0))
+        }
+    }
+
+    impl MaybeLog for Log {
         fn log(&self, level: Level, v: &str) {
             if self.level > level {
                 return;
@@ -234,16 +338,16 @@ mod inner {
             let s = Time::now();
             let d = s.date();
             let t = s.clock();
-            let _ = write!(
+            ignore_error!(write!(
                 w,
                 "{}/{:02}/{:02} {:02}:{:02}:{:02} ",
                 d.0, d.1 as u8, d.2, t.0, t.1, t.2
-            );
-            let _ = match self.prefix.as_ref() {
+            ));
+            ignore_error!(match self.prefix.as_ref() {
                 Some(p) => write!(w, "[{}] {}: {}\n", p, level, v),
                 None => write!(w, "{}: {}\n", level, v),
-            };
-            let _ = w.flush();
+            });
+            ignore_error!(w.flush());
         }
         fn log_fmt(&self, level: Level, args: Arguments<'_>) {
             if self.level > level {
@@ -253,171 +357,65 @@ mod inner {
             let s = Time::now();
             let d = s.date();
             let t = s.clock();
-            let _ = write!(
+            ignore_error!(write!(
                 w,
                 "{}/{:02}/{:02} {:02}:{:02}:{:02} ",
                 d.0, d.1 as u8, d.2, t.0, t.1, t.2
-            );
-            let _ = match self.prefix.as_ref() {
+            ));
+            ignore_error!(match self.prefix.as_ref() {
                 Some(p) => write!(w, "[{}] {}: ", p, level),
                 None => write!(w, "{}: ", level),
-            };
-            let _ = w.write_fmt(args);
-            let _ = w.write(&NEWLINE);
-            let _ = w.flush();
+            });
+            ignore_error!(w.write_fmt(args));
+            ignore_error!(w.write(&NEWLINE));
+            ignore_error!(w.flush());
         }
     }
-    impl MultiLog {
+    impl MaybeLog for RefLog {
         #[inline]
-        pub fn new() -> MultiLog {
-            MultiLog {
-                count: 0,
-                inner: [
-                    MaybeUninit::uninit(),
-                    MaybeUninit::uninit(),
-                    MaybeUninit::uninit(),
-                    MaybeUninit::uninit(),
-                    MaybeUninit::uninit(),
-                ],
+        fn log(&self, level: Level, v: &str) {
+            let p = self.0.as_ptr();
+            if !p.is_null() {
+                if let Ok(l) = unsafe { &*p }.lock() {
+                    l.log(level, v)
+                }
             }
         }
-
         #[inline]
-        pub fn len(&self) -> usize {
-            self.count as usize
-        }
-        #[inline]
-        pub fn add(&mut self, w: Logger) -> io::Result<()> {
-            if self.count > 4 {
-                return Err(ErrorKind::TooManyLinks.into());
+        fn log_fmt(&self, level: Level, args: Arguments<'_>) {
+            let p = self.0.as_ptr();
+            if !p.is_null() {
+                if let Ok(l) = unsafe { &*p }.lock() {
+                    l.log_fmt(level, args)
+                }
             }
-            self.inner[self.count as usize].write(UnsafeCell::new(w));
-            self.count += 1;
-            Ok(())
         }
     }
-
-    impl MaybeLog for Log {
+    impl MaybeLog for ThreadLog {
         #[inline]
-        fn info(&self, v: &str) {
-            self.log(Level::Info, v)
+        fn log(&self, level: Level, v: &str) {
+            if let Ok(l) = self.0.lock() {
+                l.log(level, v)
+            }
         }
         #[inline]
-        fn debug(&self, v: &str) {
-            self.log(Level::Debug, v)
-        }
-        #[inline]
-        fn trace(&self, v: &str) {
-            self.log(Level::Trace, v)
-        }
-        #[inline]
-        fn error(&self, v: &str) {
-            self.log(Level::Error, v)
-        }
-        #[inline]
-        fn fatal(&self, v: &str) {
-            self.log(Level::Fatal, v)
-        }
-        #[inline]
-        fn warning(&self, v: &str) {
-            self.log(Level::Warning, v)
-        }
-        #[inline]
-        fn info_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Info, args)
-        }
-        #[inline]
-        fn debug_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Debug, args)
-        }
-        #[inline]
-        fn trace_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Trace, args)
-        }
-        #[inline]
-        fn error_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Error, args)
-        }
-        #[inline]
-        fn fatal_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Fatal, args)
-        }
-        #[inline]
-        fn warning_fmt(&self, args: Arguments<'_>) {
-            self.log_fmt(Level::Warning, args)
+        fn log_fmt(&self, level: Level, args: Arguments<'_>) {
+            if let Ok(l) = self.0.lock() {
+                l.log_fmt(level, args)
+            }
         }
     }
     impl MaybeLog for Option<Log> {
         #[inline]
-        fn info(&self, v: &str) {
+        fn log(&self, level: Level, v: &str) {
             if let Some(l) = self {
-                l.log(Level::Info, v)
+                l.log(level, v)
             }
         }
         #[inline]
-        fn debug(&self, v: &str) {
+        fn log_fmt(&self, level: Level, args: Arguments<'_>) {
             if let Some(l) = self {
-                l.log(Level::Debug, v)
-            }
-        }
-        #[inline]
-        fn trace(&self, v: &str) {
-            if let Some(l) = self {
-                l.log(Level::Trace, v)
-            }
-        }
-        #[inline]
-        fn error(&self, v: &str) {
-            if let Some(l) = self {
-                l.log(Level::Error, v)
-            }
-        }
-        #[inline]
-        fn fatal(&self, v: &str) {
-            if let Some(l) = self {
-                l.log(Level::Fatal, v)
-            }
-        }
-        #[inline]
-        fn warning(&self, v: &str) {
-            if let Some(l) = self {
-                l.log(Level::Warning, v)
-            }
-        }
-        #[inline]
-        fn info_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Info, args)
-            }
-        }
-        #[inline]
-        fn debug_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Debug, args)
-            }
-        }
-        #[inline]
-        fn trace_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Trace, args)
-            }
-        }
-        #[inline]
-        fn error_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Error, args)
-            }
-        }
-        #[inline]
-        fn fatal_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Fatal, args)
-            }
-        }
-        #[inline]
-        fn warning_fmt(&self, args: Arguments<'_>) {
-            if let Some(l) = self {
-                l.log_fmt(Level::Warning, args)
+                l.log_fmt(level, args)
             }
         }
     }
@@ -446,8 +444,9 @@ mod inner {
         #[inline]
         fn flush(&mut self) -> io::Result<()> {
             match self {
-                Logger::Console(c) => c.flush(),
+                Logger::None => Ok(()),
                 Logger::File(f) => f.flush(),
+                Logger::Console(c) => c.flush(),
                 Logger::Writer(w) => w.flush(),
                 Logger::Multiple(m) => m.flush(),
             }
@@ -455,8 +454,9 @@ mod inner {
         #[inline]
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             match self {
-                Logger::Console(c) => c.write(buf),
+                Logger::None => Ok(buf.len()),
                 Logger::File(f) => f.write(buf),
+                Logger::Console(c) => c.write(buf),
                 Logger::Writer(w) => w.write(buf),
                 Logger::Multiple(m) => m.write(buf),
             }
@@ -464,8 +464,9 @@ mod inner {
         #[inline]
         fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
             match self {
-                Logger::Console(c) => c.write_all(buf),
+                Logger::None => Ok(()),
                 Logger::File(f) => f.write_all(buf),
+                Logger::Console(c) => c.write_all(buf),
                 Logger::Writer(w) => w.write_all(buf),
                 Logger::Multiple(m) => m.write_all(buf),
             }
@@ -473,8 +474,9 @@ mod inner {
         #[inline]
         fn write_fmt(&mut self, args: Arguments<'_>) -> io::Result<()> {
             match self {
-                Logger::Console(c) => c.write_fmt(args),
+                Logger::None => Ok(()),
                 Logger::File(f) => f.write_fmt(args),
+                Logger::Console(c) => c.write_fmt(args),
                 Logger::Writer(w) => w.write_fmt(args),
                 Logger::Multiple(m) => m.write_fmt(args),
             }
@@ -483,29 +485,41 @@ mod inner {
     impl Write for MultiLog {
         #[inline]
         fn flush(&mut self) -> io::Result<()> {
-            for i in 0..self.count {
-                unsafe { &mut *(&*(&self.inner[i as usize]).as_ptr()).get() }.flush()?;
+            for i in self.0.iter_mut() {
+                if i.is_none() {
+                    break;
+                }
+                i.flush()?;
             }
             Ok(())
         }
         #[inline]
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            for i in 0..self.count {
-                unsafe { &mut *(&*(&self.inner[i as usize]).as_ptr()).get() }.write(buf)?;
+            for i in self.0.iter_mut() {
+                if i.is_none() {
+                    break;
+                }
+                i.write(buf)?;
             }
             Ok(buf.len())
         }
         #[inline]
         fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-            for i in 0..self.count {
-                unsafe { &mut *(&*(&self.inner[i as usize]).as_ptr()).get() }.write_all(buf)?;
+            for i in self.0.iter_mut() {
+                if i.is_none() {
+                    break;
+                }
+                i.write_all(buf)?;
             }
             Ok(())
         }
         #[inline]
         fn write_fmt(&mut self, args: Arguments<'_>) -> io::Result<()> {
-            for i in 0..self.count {
-                unsafe { &mut *(&*(&self.inner[i as usize]).as_ptr()).get() }.write_fmt(args)?;
+            for i in self.0.iter_mut() {
+                if i.is_none() {
+                    break;
+                }
+                i.write_fmt(args)?;
             }
             Ok(())
         }
@@ -527,6 +541,107 @@ mod inner {
         #[inline]
         fn from(v: MultiLog) -> Logger {
             Logger::Multiple(Box::new(v))
+        }
+    }
+
+    impl Clone for RefLog {
+        #[inline]
+        fn clone(&self) -> RefLog {
+            RefLog(self.0.clone())
+        }
+    }
+
+    impl Clone for ThreadLog {
+        #[inline]
+        fn clone(&self) -> ThreadLog {
+            ThreadLog(self.0.clone())
+        }
+    }
+    impl From<Log> for ThreadLog {
+        #[inline]
+        fn from(v: Log) -> ThreadLog {
+            ThreadLog(Arc::new(Mutex::new(v)))
+        }
+    }
+
+    impl From<[Logger; 1]> for MultiLog {
+        #[inline]
+        fn from(v: [Logger; 1]) -> MultiLog {
+            let mut m = MultiLog::new();
+            match v {
+                // Hack to TAKE elements from array and destructure it.
+                [a] => {
+                    // We ignore the errors as they can't happen.
+                    ignore_error!(m.add(a));
+                },
+            }
+            m
+        }
+    }
+    impl From<[Logger; 2]> for MultiLog {
+        #[inline]
+        fn from(v: [Logger; 2]) -> MultiLog {
+            let mut m = MultiLog::new();
+            match v {
+                // Hack to TAKE elements from array and destructure it.
+                [a, b] => {
+                    // We ignore the errors as they can't happen.
+                    ignore_error!(m.add(a));
+                    ignore_error!(m.add(b));
+                },
+            }
+            m
+        }
+    }
+    impl From<[Logger; 3]> for MultiLog {
+        #[inline]
+        fn from(v: [Logger; 3]) -> MultiLog {
+            let mut m = MultiLog::new();
+            match v {
+                // Hack to TAKE elements from array and destructure it.
+                [a, b, c] => {
+                    // We ignore the errors as they can't happen.
+                    ignore_error!(m.add(a));
+                    ignore_error!(m.add(b));
+                    ignore_error!(m.add(c));
+                },
+            }
+            m
+        }
+    }
+    impl From<[Logger; 4]> for MultiLog {
+        #[inline]
+        fn from(v: [Logger; 4]) -> MultiLog {
+            let mut m = MultiLog::new();
+            match v {
+                // Hack to TAKE elements from array and destructure it.
+                [a, b, c, d] => {
+                    // We ignore the errors as they can't happen.
+                    ignore_error!(m.add(a));
+                    ignore_error!(m.add(b));
+                    ignore_error!(m.add(c));
+                    ignore_error!(m.add(d));
+                },
+            }
+            m
+        }
+    }
+    impl From<[Logger; 5]> for MultiLog {
+        #[inline]
+        fn from(v: [Logger; 5]) -> MultiLog {
+            let mut m = MultiLog::new();
+            match v {
+                // Hack to TAKE elements from array and destructure it.
+                [a, b, c, d, e] => {
+                    // We ignore the errors as they can't happen.
+                    ignore_error!(m.add(a));
+                    ignore_error!(m.add(b));
+                    ignore_error!(m.add(c));
+                    ignore_error!(m.add(d));
+                    ignore_error!(m.add(e));
+                },
+            }
+            m
         }
     }
 
@@ -576,6 +691,10 @@ mod inner {
     unsafe impl Send for Log {}
 
     #[inline]
+    pub fn none() -> Logger {
+        Logger::None
+    }
+    #[inline]
     pub fn console() -> Logger {
         Logger::Console(io::stderr())
     }
@@ -594,73 +713,254 @@ mod inner {
     }
 }
 
-#[cfg(all(feature = "bugs", not(feature = "implant")))]
+#[cfg(feature = "bugs")]
 pub(crate) mod bugs {
+    use core::cell::UnsafeCell;
     use core::fmt::Arguments;
+    use core::mem::MaybeUninit;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::device::env;
-    use crate::process;
-    use crate::sync::LazyLock;
-    use crate::util::log::{self, Level, Log, MultiLog};
-    use crate::util::stx::io::{self, Write};
-    use crate::util::stx::prelude::*;
-
-    static BUGLOG: LazyLock<Log> = LazyLock::new(|| {
-        let c = log::console();
-        let t = env::temp_dir().join(format!("bugtrack-{}.log", process::id()));
-        let (o, z) = match log::file(&t) {
-            Err(_) => (c, false),
-            Ok(f) => {
-                let mut m = MultiLog::new();
-                let _ = m.add(c);
-                let _ = m.add(f);
-                (m.into(), true)
-            },
-        };
-        let l = Log::new(Level::Trace, "BUGTRACK", o);
-        if z {
-            crate::info!(
-                l,
-                "Bugtrack log init complete! Log file located at \"{}\"",
-                t.to_string_lossy()
-            );
-        } else {
-            crate::info!(l, "Bugtrack log init complete!");
-        }
-        l
-    });
+    use crate::prelude::*;
+    use crate::util::log::{Level, Log, Logger, MaybeLog};
 
     #[macro_export]
     macro_rules! bugtrack {
         ($($arg:tt)*) => {
-            crate::util::log::bugs::_bugtrack(format_args!($($arg)*))
-        };
-    }
-    #[macro_export]
-    macro_rules! bugprint {
-        ($($arg:tt)*) => {
-            crate::util::log::bugs::_bugprint(format_args!($($arg)*))
+            crate::util::log::bugs::BUGLOG.log(format_args!($($arg)*))
         };
     }
 
-    #[inline]
-    pub(crate) fn _bugprint(args: Arguments<'_>) {
-        let _ = io::stderr().write_fmt(args); // IGNORE ERROR
-        let _ = io::stderr().write(&super::inner::NEWLINE); // IGNORE ERROR
+    pub(crate) static BUGLOG: BugLog = BugLog::new();
+
+    pub(crate) struct BugLog {
+        state: AtomicBool,
+        inner: UnsafeCell<MaybeUninit<Log>>,
     }
-    #[inline]
-    pub(crate) fn _bugtrack(args: Arguments<'_>) {
-        BUGLOG.trace_fmt(args)
+
+    impl BugLog {
+        #[inline]
+        const fn new() -> BugLog {
+            BugLog {
+                state: AtomicBool::new(false),
+                inner: UnsafeCell::new(MaybeUninit::uninit()),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn log(&self, args: Arguments<'_>) {
+            self.init();
+            unsafe { (&*(self.inner.get())).assume_init_ref() }.trace_fmt(args);
+        }
+
+        fn init(&self) {
+            if self
+                .state
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                let c = Logger::Writer(Box::new(sys::stderr()));
+                let l = match sys::create_log_file() {
+                    Some((f, p)) => {
+                        let v = Log::new(
+                            Level::Trace,
+                            "BUGTRACK",
+                            Logger::Multiple(Box::new([c, Logger::Writer(Box::new(f))].into())),
+                        );
+                        // Let us know where the new Log file is.
+                        crate::info!(v, "Bugtrack log init complete! Log file located at \"{p}\"");
+                        v
+                    },
+                    None => Log::new(Level::Trace, "BUGTRACK", c),
+                };
+                unsafe { (&mut *(self.inner.get())).write(l) };
+            }
+        }
+    }
+
+    unsafe impl Send for BugLog {}
+    unsafe impl Sync for BugLog {}
+
+    #[cfg(target_family = "windows")]
+    mod sys {
+        use core::{cmp, ptr};
+
+        use crate::device::winapi::{self, DecodeUtf16, Handle, WChar, WCharPtr};
+        use crate::ignore_error;
+        use crate::io::{self, Write};
+        use crate::prelude::*;
+
+        pub struct Log(Handle);
+        pub struct Console(Handle);
+
+        impl Drop for Log {
+            #[inline]
+            fn drop(&mut self) {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+        impl Write for Log {
+            #[inline]
+            fn flush(&mut self) -> io::Result<()> {
+                ignore_error!(unsafe { FlushFileBuffers(self.0) });
+                Ok(())
+            }
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let mut n = 0;
+                let r = unsafe {
+                    WriteFile(
+                        self.0,
+                        buf.as_ptr(),
+                        cmp::min(buf.len(), 0xFFFFFFFF) as u32,
+                        &mut n,
+                        ptr::null_mut(),
+                    )
+                };
+                if r == 0 {
+                    // Safe as this is all in ASM.
+                    Err(winapi::last_error().into())
+                } else {
+                    Ok(n as usize)
+                }
+            }
+        }
+        impl Write for Console {
+            #[inline]
+            fn flush(&mut self) -> io::Result<()> {
+                ignore_error!(unsafe { FlushFileBuffers(self.0) });
+                Ok(())
+            }
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let mut n = 0;
+                let r = unsafe {
+                    WriteConsoleA(
+                        self.0,
+                        buf.as_ptr(),
+                        cmp::min(buf.len(), 0xFFFFFFFF) as u32,
+                        &mut n,
+                        0,
+                    )
+                };
+                return if r == 0 {
+                    // Safe as this is all in ASM.
+                    Err(winapi::last_error().into())
+                } else {
+                    Ok(n as usize)
+                };
+            }
+        }
+
+        #[inline]
+        pub fn stderr() -> Console {
+            // This is safe as it's all ASM
+            Console(winapi::GetCurrentProcessPEB().process_params().standard_error)
+        }
+        pub fn create_log_file() -> Option<(Log, String)> {
+            let mut buf = [0u16; 261];
+            let r = unsafe { GetTempPathW(261, buf.as_mut_ptr()) };
+            if r == 0 {
+                return None;
+            }
+            let mut p = (&buf[0..r as usize]).decode_utf16();
+            // GetCurrentProcessID is safe here, it's ASM and does not call and DLL
+            // loads.
+            p.push_str(&format!("bugtrack-{}.log", winapi::GetCurrentProcessID()));
+            let n = WChar::from(p.as_str());
+            let f = unsafe {
+                // 0x1      - FILE_SHARE_READ
+                // 0x110114 - DELETE | SYNCHRONIZE | FILE_WRITE_ATTRIBUTES | FILE_APPEND_DATA |
+                // FILE_WRITE_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+                // 0x2      - CREATE_ALWAYS
+                CreateFileW(
+                    n.as_wchar_ptr(),
+                    0x110114,
+                    0x1,
+                    ptr::null(),
+                    0x2,
+                    0,
+                    Handle::INVALID,
+                )
+            };
+            if f.is_invalid() {
+                None
+            } else {
+                Some((Log(f), p))
+            }
+        }
+
+        // Link and load modules to be able to debug issues during sensitive loading
+        // areas. Also prevent deadlocks.
+        //
+        // This also happens in the Stdio lib so we can also use 'print{,ln}' in
+        // critical areas without deadlocks.
+        #[link(name = "kernel32")]
+        extern "stdcall" {
+            fn CloseHandle(h: Handle) -> u32;
+            fn FlushFileBuffers(h: Handle) -> u32;
+            fn GetTempPathW(len: u32, buf: *mut u16) -> u32;
+            fn WriteConsoleA(h: Handle, s: *const u8, n: u32, w: *mut u32, r: u32) -> u32;
+            fn WriteFile(h: Handle, buf: *const u8, size: u32, written: *mut u32, overlap: *mut u8) -> u32;
+            fn CreateFileW(name: WCharPtr, access: u32, share: u32, sa: *const u8, mode: u32, attrs: u32, template: Handle) -> Handle;
+        }
+    }
+    #[cfg(not(target_family = "windows"))]
+    mod sys {
+        pub use std::sync::Mutex;
+
+        use crate::env::temp_dir;
+        use crate::fs::{File, OpenOptions};
+        use crate::io::{self, Stderr, Write};
+        use crate::prelude::*;
+        use crate::process::id;
+
+        pub struct Log(File);
+        pub struct Console(Stderr);
+
+        impl Write for Log {
+            #[inline]
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.flush()
+            }
+            #[inline]
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.write(buf)
+            }
+        }
+        impl Write for Console {
+            #[inline]
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.flush()
+            }
+            #[inline]
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.write(buf)
+            }
+        }
+
+        #[inline]
+        pub fn stderr() -> Console {
+            Console(io::stderr())
+        }
+        #[inline]
+        pub fn create_log_file() -> Option<(Log, String)> {
+            let p = temp_dir().join(format!("bugtrack-{}.log", id()));
+            let n = p.to_string_lossy().to_string();
+            Some((
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .create(true)
+                    .open(p)
+                    .ok()
+                    .map(Log)?,
+                n,
+            ))
+        }
     }
 }
-#[cfg(any(not(feature = "bugs"), feature = "implant"))]
+#[cfg(not(feature = "bugs"))]
 pub(crate) mod bugs {
     #[macro_export]
     macro_rules! bugtrack {
         ($($args:tt)*) => {{}};
-    }
-    #[macro_export]
-    macro_rules! bugprint {
-        ($($arg:tt)*) => {{}};
     }
 }

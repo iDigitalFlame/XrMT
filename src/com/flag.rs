@@ -17,28 +17,29 @@
 #![no_implicit_prelude]
 
 use core::cmp::Ordering;
-use core::ops::{Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Deref, Sub, SubAssign};
 
 use crate::data::{Readable, Reader, Writable, Writer};
-use crate::util::stx::io;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
+use crate::{io, number_like};
+
+number_like!(Flag, u64);
 
 pub struct Flag(pub u64);
 
 impl Flag {
-    pub const FRAG: Flag = Flag(0x1);
-    pub const MULTI: Flag = Flag(0x2);
-    pub const PROXY: Flag = Flag(0x4);
-    pub const ERROR: Flag = Flag(0x8);
-    pub const CHANNEL: Flag = Flag(0x10);
-    pub const CHANNEL_END: Flag = Flag(0x20);
-    pub const ONESHOT: Flag = Flag(0x40);
-    pub const MULTI_DEVICE: Flag = Flag(0x80);
-    pub const CRYPT: Flag = Flag(0x100);
+    pub const FRAG: Flag = Flag(0x1u64);
+    pub const MULTI: Flag = Flag(0x2u64);
+    pub const PROXY: Flag = Flag(0x4u64);
+    pub const ERROR: Flag = Flag(0x8u64);
+    pub const CHANNEL: Flag = Flag(0x10u64);
+    pub const CHANNEL_END: Flag = Flag(0x20u64);
+    pub const ONESHOT: Flag = Flag(0x40u64);
+    pub const MULTI_DEVICE: Flag = Flag(0x80u64); // NOTE(dij): Should we infer MULTI?
+    pub const CRYPT: Flag = Flag(0x100u64);
 
     #[inline]
     pub const fn new() -> Flag {
-        Flag(0)
+        Flag(0u64)
     }
 
     #[inline]
@@ -110,61 +111,6 @@ impl Ord for Flag {
         }
     }
 }
-impl Add for Flag {
-    type Output = Flag;
-
-    #[inline]
-    fn add(self, rhs: Flag) -> Flag {
-        Flag(self.0 | rhs.0)
-    }
-}
-impl Sub for Flag {
-    type Output = Flag;
-
-    #[inline]
-    fn sub(self, rhs: Flag) -> Flag {
-        Flag(self.0 ^ rhs.0)
-    }
-}
-impl Copy for Flag {}
-impl Deref for Flag {
-    type Target = u64;
-
-    #[inline]
-    fn deref(&self) -> &u64 {
-        &self.0
-    }
-}
-impl BitOr for Flag {
-    type Output = Flag;
-
-    #[inline]
-    fn bitor(self, rhs: Flag) -> Flag {
-        Flag(self.0 | rhs.0)
-    }
-}
-impl Clone for Flag {
-    #[inline]
-    fn clone(&self) -> Flag {
-        Flag(self.0)
-    }
-}
-impl BitXor for Flag {
-    type Output = Flag;
-
-    #[inline]
-    fn bitxor(self, rhs: Flag) -> Flag {
-        Flag(self.0 ^ rhs.0)
-    }
-}
-impl BitAnd for Flag {
-    type Output = Flag;
-
-    #[inline]
-    fn bitand(self, rhs: Flag) -> Flag {
-        Flag(self.0 & rhs.0)
-    }
-}
 impl Default for Flag {
     #[inline]
     fn default() -> Flag {
@@ -183,66 +129,30 @@ impl Readable for Flag {
         r.read_into_u64(&mut self.0)
     }
 }
-impl AddAssign for Flag {
-    #[inline]
-    fn add_assign(&mut self, rhs: Flag) {
-        self.0 |= rhs.0
-    }
-}
-impl SubAssign for Flag {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Flag) {
-        self.0 ^= rhs.0
-    }
-}
-impl PartialEq for Flag {
-    #[inline]
-    fn eq(&self, other: &Flag) -> bool {
-        self.0 == other.0
-    }
-}
 impl PartialOrd for Flag {
     #[inline]
     fn partial_cmp(&self, other: &Flag) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl BitOrAssign for Flag {
-    #[inline]
-    fn bitor_assign(&mut self, rhs: Flag) {
-        self.0 |= rhs.0
-    }
-}
-impl BitAndAssign for Flag {
-    #[inline]
-    fn bitand_assign(&mut self, rhs: Flag) {
-        self.0 &= rhs.0
-    }
-}
-impl BitXorAssign for Flag {
-    #[inline]
-    fn bitxor_assign(&mut self, rhs: Flag) {
-        self.0 ^= rhs.0
-    }
-}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::Flag;
-    use crate::util::stx::prelude::*;
+    use crate::com::Flag;
+    use crate::prelude::*;
     use crate::util::{ToStr, ToStrHex};
 
     impl Debug for Flag {
         #[inline]
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            Display::fmt(self, f)
+            f.debug_tuple("Flag").field(&self.0).finish()
         }
     }
     impl Display for Flag {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            let (mut b, mut n) = ([0u8; 27], 0);
+            let (mut b, mut n) = ([0u8; 27], 0usize);
             if self.has(Flag::FRAG) {
                 b[n] = b'F';
                 n += 1;
@@ -285,7 +195,7 @@ mod display {
             }
             if self.has(Flag::MULTI) && self.len() > 0 {
                 b[n] = b'[';
-                n += 1 + self.len().into_hex_buf(&mut b[n + 1..]);
+                n += 1 + self.len().into_buf(&mut b[n + 1..]);
                 b[n] = b']';
                 n += 1;
             } else if self.has(Flag::FRAG) && !self.has(Flag::MULTI) {

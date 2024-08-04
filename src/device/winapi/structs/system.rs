@@ -15,11 +15,11 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use crate::data::blob::Slice;
 use crate::device::winapi;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 pub const WIN_TIME_EPOCH: i64 = 0x19DB1DED53E8000;
 
@@ -30,6 +30,30 @@ pub struct SystemTime {
     pub low:  u32,
     pub high: i32,
     pad:      i32,
+}
+#[repr(C)]
+pub struct TimeZoneInfo {
+    pub bias:          u32,
+    pub standard_name: [u16; 32],
+    pad1:              [u8; 16],
+    pub standard_bias: u32,
+    pub daylight_name: [u16; 32],
+    pad2:              [u8; 16],
+    pub daylight_bias: u32,
+}
+#[repr(C)]
+pub struct OsVersionInfo {
+    pub ver_info_size: u32,
+    pub major:         u32,
+    pub minor:         u32,
+    pub build:         u32,
+    pub platform:      u32,
+    pub sp_name:       [u16; 128],
+    pub sp_major:      u16,
+    pub sp_minor:      u16,
+    pub mask:          u16,
+    pub product:       u8,
+    pad:               u8,
 }
 #[repr(C)]
 pub struct SystemBasicInfo {
@@ -49,19 +73,30 @@ pub struct SystemBasicInfo {
 pub struct KernelUserShared {
     pad1:                     [u8; 20],
     pub system_time:          SystemTime,
-    pad2:                     [u8; 16],
+    pub time_zone_bias:       SystemTime,
+    pad2:                     u32,
     pub system_root:          [u16; 260],
     pub max_stack_trace:      u32,
     pad3:                     u32,
-    pad4:                     [u8; 32],
+    pub time_zone_id:         u32,
+    pub large_page_min:       u32,
+    pad4:                     u32,
+    pub app_compat_flag:      u32,
+    pub rng_seed_ver:         u64,
+    pub global_val_runlevel:  u32,
+    pub time_zone_bias_stamp: u32,
     pub build_number:         u32,
-    pad5:                     [u8; 8],
+    pub nt_product_type:      u32,
+    pad5:                     [u8; 2],
+    pub native_proc_arch:     u16,
     pub major_version:        u32,
     pub minor_version:        u32,
     pub processor_features:   [u8; 64],
-    pad6:                     [u8; 20],
+    pad6:                     [u8; 8],
+    pub time_slip:            u32,
+    pad7:                     [u8; 8],
     pub expiration_date:      u64,
-    pad7:                     [u8; 4],
+    pub suite_mask:           u32,
     pub ke_debugger_enabled:  u8,
     pub mitigation_policies:  u8,
     pad8:                     [u8; 2],
@@ -74,13 +109,79 @@ pub struct KernelUserShared {
     pub shared_flags:         u32,
 }
 
+impl SystemTime {
+    #[inline]
+    pub fn as_i64(&self) -> i64 {
+        ((self.high as i64) << 32) | self.low as i64
+    }
+    #[inline]
+    pub fn as_unix_ns(&self) -> i64 {
+        (self.as_i64() - WIN_TIME_EPOCH) * 100
+    }
+}
+
+impl Default for TimeZoneInfo {
+    #[inline]
+    fn default() -> TimeZoneInfo {
+        TimeZoneInfo {
+            pad1:          [0u8; 16],
+            pad2:          [0u8; 16],
+            bias:          0u32,
+            standard_name: [0u16; 32],
+            standard_bias: 0u32,
+            daylight_name: [0u16; 32],
+            daylight_bias: 0u32,
+        }
+    }
+}
+impl Default for OsVersionInfo {
+    #[inline]
+    fn default() -> OsVersionInfo {
+        OsVersionInfo {
+            pad:           0u8,
+            mask:          0u16,
+            major:         0u32,
+            minor:         0u32,
+            build:         0u32,
+            sp_name:       [0u16; 128],
+            product:       0u8,
+            platform:      032,
+            sp_major:      0u16,
+            sp_minor:      0u16,
+            ver_info_size: 0x11C,
+        }
+    }
+}
+impl Default for SystemBasicInfo {
+    #[inline]
+    fn default() -> SystemBasicInfo {
+        SystemBasicInfo {
+            pad:                       0u32,
+            page_size:                 0u32,
+            affinity_mask:             0usize,
+            time_resolution:           0u32,
+            min_user_address:          0usize,
+            max_user_address:          0usize,
+            number_of_processors:      0u8,
+            number_physical_pages:     0u32,
+            allocation_granularity:    0u32,
+            lowest_physical_page_num:  0u32,
+            highest_physical_page_num: 0u32,
+        }
+    }
+}
+
 #[inline]
-pub fn kernel_nano_time() -> i64 {
-    let k = KERNEL_SHARED_DATA as *const KernelUserShared;
-    unsafe { ((((*k).system_time.high as i64) << 32 | (*k).system_time.low as i64) - WIN_TIME_EPOCH) * 100 }
+pub fn kernel_time_offset() -> i64 {
+    let s = kernel_user_shared();
+    s.system_time.as_i64() - s.time_zone_bias.as_i64()
+}
+#[inline]
+pub fn kernel_nano_sec_time() -> i64 {
+    kernel_user_shared().system_time.as_unix_ns()
 }
 pub fn system_dir() -> Slice<u16, 270> {
-    let mut b: Slice<u16, 270> = unsafe { (*winapi::kernel_user_shared()).system_root }.into();
+    let mut b: Slice<u16, 270> = winapi::kernel_user_shared().system_root.into();
     let p = match b.iter().position(|v| *v == 0) {
         Some(i) => {
             if b[i - 1] != b'\\' as u16 {
@@ -106,7 +207,7 @@ pub fn system_dir() -> Slice<u16, 270> {
 }
 #[inline]
 pub fn system_root() -> Slice<u8, 260> {
-    let r = unsafe { &(*winapi::kernel_user_shared()).system_root };
+    let r = kernel_user_shared().system_root;
     let mut b = Slice::with_len(r.iter().position(|v| *v == 0).unwrap_or(260));
     for i in 0..b.len {
         b[i] = r[i] as u8
@@ -114,6 +215,10 @@ pub fn system_root() -> Slice<u8, 260> {
     b
 }
 #[inline]
-pub fn kernel_user_shared() -> *const KernelUserShared {
-    KERNEL_SHARED_DATA as *const KernelUserShared
+pub fn kernel_nano_sec_local_time() -> i64 {
+    (kernel_time_offset() - winapi::WIN_TIME_EPOCH) * 100
+}
+#[inline]
+pub fn kernel_user_shared<'a>() -> &'a KernelUserShared {
+    unsafe { &*(KERNEL_SHARED_DATA as *const KernelUserShared) }
 }

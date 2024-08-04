@@ -15,50 +15,60 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
-use core::{cmp, mem, ptr};
+use core::mem::size_of;
+use core::slice::from_raw_parts;
+use core::{cmp, ptr};
 
 use crate::data::blob::Blob;
-use crate::device::rand::Rand;
+use crate::data::rand::Rand;
+use crate::data::str::MaybeString;
+use crate::data::time::Time;
 use crate::device::winapi::functions::{FileLinkInformation, FilePipeWait, IoStatusBlock, RegKeyValuePartialInfo};
 use crate::device::winapi::loader::{kernel32, ntdll};
 use crate::device::winapi::registry::Key;
 use crate::device::winapi::{
     self,
+    time_to_windows_time,
     AnsiString,
     AsHandle,
     Chars,
     ClientID,
     DecodeUtf16,
-    FileBasicInfo,
-    FileStandardInfo,
+    FileBasicInformation,
+    FileStandardInformation,
     Handle,
-    MaybeString,
     ObjectAttributes,
     ObjectBasicInformation,
     Overlapped,
     OverlappedIo,
     OwnedHandle,
     ProcessBasicInfo,
+    ReadInto,
     RegKeyBasicInfo,
     RegKeyFullInfo,
     RegKeyValueFullInfo,
     Region,
+    SIDAndAttributes,
     SecAttrs,
     SecurityAttributes,
     SecurityQualityOfService,
     ThreadBasicInfo,
     TimerFunc,
     TokenPrivileges,
+    TokenUser,
     UnicodeStr,
     UnicodeString,
     WChars,
     Win32Error,
     Win32Result,
+    WriteFrom,
+    PTR_SIZE,
 };
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::prelude::*;
 use crate::util::{self, crypt, HEXTABLE};
 
 macro_rules! object_attrs {
@@ -76,10 +86,16 @@ macro_rules! object_attrs {
 // Helper Functions
 /////////////////////////////////////
 #[inline]
+pub fn hide_thread(h: impl AsHandle) -> Win32Result<()> {
+    // 0x11 - ThreadHideFromDebugger
+    NtSetInformationThread(h, 0x11, ptr::null::<usize>(), 0)
+}
+#[inline]
 pub fn delete_file_by_handle(h: impl AsHandle) -> Win32Result<()> {
     // 0xD - FileDispositionInformation
     let d = 1u32; // Prevent optimization of NUL ptr.
-    NtSetInformationFile(h, 0xD, &d, 4).map(|_| ())
+    NtSetInformationFile(h, 0xD, &d, 4)?;
+    Ok(())
 }
 pub fn file_name_by_handle(h: impl AsHandle) -> Win32Result<String> {
     winapi::init_ntdll();
@@ -102,18 +118,90 @@ pub fn file_name_by_handle(h: impl AsHandle) -> Win32Result<String> {
             _ => return Err(winapi::nt_error(r)),
         }
     }
-    // SAFETY: The object is a UNICODE_STRING, the values should ALWAYS be smaller
-    //         than the OS result, if not the OS is lying! Also n always < b.len().
-    Ok(unsafe { &b.get_unchecked(winapi::PTR_SIZE..(cmp::min(n, b[0] as u32) as usize / 2) + winapi::PTR_SIZE) }.decode_utf16())
+    Ok((&b[winapi::PTR_SIZE..(cmp::min(n, b[0] as u32) as usize / 2) + winapi::PTR_SIZE]).decode_utf16())
 }
 #[inline]
 pub fn set_file_attrs_by_handle(h: impl AsHandle, attrs: u32) -> Win32Result<()> {
-    let i = FileBasicInfo {
+    let i = FileBasicInformation {
         attributes:       attrs,
-        change_time:      0,
-        creation_time:    0,
-        last_write_time:  0,
-        last_access_time: 0,
+        change_time:      0i64,
+        creation_time:    0i64,
+        last_write_time:  0i64,
+        last_access_time: 0i64,
+    };
+    // 0x4 - FileBasicInfo
+    NtSetInformationFile(h, 0x4, &i, 0x28)?;
+    Ok(())
+}
+pub fn token_user<'a>(h: impl AsHandle, buf: &'a mut Blob<u8, 256>) -> Win32Result<&'a TokenUser> {
+    winapi::init_ntdll();
+    let (mut n, mut c) = (64u32, 64u32);
+    let func = unsafe {
+        winapi::make_syscall!(
+            *ntdll::NtQueryInformationToken,
+            extern "stdcall" fn(Handle, u32, *mut u8, u32, *mut u32) -> u32
+        )
+    };
+    let v = h.as_handle();
+    loop {
+        buf.resize(n as usize);
+        // 0x1 - TokenUser
+        let r = func(v, 0x1, buf.as_mut_ptr(), n, &mut c);
+        match r {
+            0x7A => return Err(winapi::nt_error(r)), // 0x7A - ERROR_INSUFFICIENT_BUFFER
+            0 => return Ok(unsafe { &*(buf.as_ptr() as *const TokenUser) }),
+            _ if c < n => return Err(winapi::nt_error(r)),
+            _ => n = c,
+        }
+    }
+}
+pub fn token_groups<'a, const N: usize>(t: impl AsHandle, buf: &'a mut Blob<u8, N>) -> Win32Result<Vec<&'a SIDAndAttributes>> {
+    winapi::init_ntdll();
+    let func = unsafe {
+        winapi::make_syscall!(
+            *ntdll::NtQueryInformationToken,
+            extern "stdcall" fn(Handle, u32, *mut u8, u32, *mut u32) -> u32
+        )
+    };
+    let h = t.as_handle();
+    let mut n = 0u32;
+    buf.resize(256);
+    loop {
+        let r = func(h, 0x2, buf.as_mut_ptr(), buf.len() as u32, &mut n);
+        match r {
+            // 0xC0000023 - STATUS_BUFFER_TOO_SMALL
+            0xC0000023 => {
+                buf.resize(n as usize);
+                continue;
+            },
+            0 => break,
+            _ => return Err(winapi::nt_error(r)),
+        }
+    }
+    let c = unsafe { *(buf.as_ptr_of::<u32>()) } as usize;
+    let mut r = Vec::with_capacity(c);
+    if c == 0 {
+        return Ok(r);
+    }
+    let d = unsafe {
+        from_raw_parts(
+            buf.as_ptr().add(winapi::PTR_SIZE) as *const SIDAndAttributes,
+            c,
+        )
+    };
+    for i in d {
+        r.push(i)
+    }
+    Ok(r)
+}
+#[inline]
+pub fn set_file_time_by_handle(h: impl AsHandle, created: Option<Time>, modified: Option<Time>, access: Option<Time>) -> Win32Result<()> {
+    let i = FileBasicInformation {
+        attributes:       0u32,
+        change_time:      modified.map_or(0, time_to_windows_time),
+        creation_time:    created.map_or(0, time_to_windows_time),
+        last_write_time:  0i64,
+        last_access_time: access.map_or(0, time_to_windows_time),
     };
     // 0x4 - FileBasicInfo
     NtSetInformationFile(h, 0x4, &i, 0x28)?;
@@ -125,12 +213,12 @@ pub fn set_file_attrs_by_handle(h: impl AsHandle, attrs: u32) -> Win32Result<()>
 /////////////////////////////////////
 pub fn CloseHandle(h: Handle) -> Win32Result<()> {
     if h.is_invalid() {
-        crate::bugtrack!("winapi::CloseHandle(): Attempted to close an invalid Handle!");
+        bugtrack!("winapi::CloseHandle(): Attempted to close an invalid Handle!");
         return Ok(());
     }
     winapi::init_ntdll();
     let r = unsafe { winapi::syscall!(*ntdll::NtClose, extern "stdcall" fn(Handle) -> u32, h) };
-    crate::bugtrack!(
+    bugtrack!(
         "winapi::CloseHandle(): Closing Handle '{:x}' (result {r:X}).",
         h.0
     );
@@ -258,6 +346,15 @@ pub fn FreeLibrary(dll: Handle) -> Win32Result<()> {
     }
 }
 #[inline]
+pub fn LoadLibraryW(path: &[u16]) -> Win32Result<Handle> {
+    // Raw UTF16 version to prevent allocating back into a string.
+    winapi::init_ntdll();
+    unsafe {
+        let n = UnicodeString::new(&path);
+        ldl_load_library(&n)
+    }
+}
+#[inline]
 pub fn LoadLibrary(path: impl AsRef<str>) -> Win32Result<Handle> {
     winapi::init_ntdll();
     unsafe {
@@ -266,56 +363,72 @@ pub fn LoadLibrary(path: impl AsRef<str>) -> Win32Result<Handle> {
         ldl_load_library(&n)
     }
 }
+pub fn GetModuleHandleExW(flags: u32, name: &[u16]) -> Win32Result<Handle> {
+    // Raw UTF16 version to prevent allocating back into a string.
+    if flags & 0x4 != 0 {
+        // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+        // NOTE(dij): This is too annoying to support.
+        return Err(Win32Error::InvalidOperation);
+    }
+    if name.len() == 0 {
+        return Ok(winapi::GetCurrentProcessPEB().image_base_address);
+    }
+    let mut f = 0u32;
+    // Translate kernel32 flags to NT flags.
+    if flags & 0x1 != 0 {
+        // GET_MODULE_HANDLE_EX_FLAG_PIN
+        f |= 0x2 // LDR_GET_DLL_HANDLE_EX_PIN
+    }
+    if flags & 0x2 != 0 {
+        // GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
+        f |= 0x1 // LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT
+    }
+    let mut n: WChars = name.iter().collect();
+    let i = n.len();
+    // Add '.dll' extension if it isn't present.
+    if n.len() > 5 && n[i - 5] != b'.' as u16 && n[i - 4] != b'd' as u16 {
+        n[i - 1] = b'.' as u16;
+        n.reserve(4);
+        n.push(b'd' as u16);
+        n.push(b'l' as u16);
+        n.push(b'l' as u16);
+        n.push(0);
+    }
+    winapi::init_ntdll();
+    let u = UnicodeString::new(&n);
+    let func = unsafe {
+        winapi::make_syscall!(
+            *ntdll::LdrGetDllHandleEx,
+            extern "stdcall" fn(u32, *const u16, *const u32, *const UnicodeString, *mut Handle) -> u32
+        )
+    };
+    let mut h = Handle::default();
+    let r = if name.iter().position(|v| *v == b'\\' as u16 || *v == b'/' as u16).is_some() {
+        func(f, ptr::null(), ptr::null(), &u, &mut h)
+    } else {
+        let d = winapi::system_dir();
+        func(f, d.as_ptr(), ptr::null(), &u, &mut h)
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(h)
+    }
+}
 pub fn GetModuleHandleEx(flags: u32, name: impl MaybeString) -> Win32Result<Handle> {
-    if flags & 0x4 > 0 {
+    if flags & 0x4 != 0 {
         // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
         // NOTE(dij): This is too annoying to support.
         return Err(Win32Error::InvalidOperation);
     }
     if let Some(s) = name.into_string() {
-        let mut f = 0u32;
-        // Translate kernel32 flags to NT flags.
-        if flags & 0x1 > 0 {
-            // GET_MODULE_HANDLE_EX_FLAG_PIN
-            f |= 0x2 // LDR_GET_DLL_HANDLE_EX_PIN
-        }
-        if flags & 0x2 > 0 {
-            // GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
-            f |= 0x1 // LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT
-        }
-        let mut n: WChars = s.into();
-        let i = n.len();
-        // Add '.dll' extension if it isn't present.
-        if n.len() > 5 && n[i - 5] != b'.' as u16 && n[i - 4] != b'd' as u16 {
-            n[i - 1] = b'.' as u16;
-            n.reserve(4);
-            n.push(b'd' as u16);
-            n.push(b'l' as u16);
-            n.push(b'l' as u16);
-            n.push(0);
-        }
-        winapi::init_ntdll();
-        let u = UnicodeString::new(&n);
-        let func = unsafe {
-            winapi::make_syscall!(
-                *ntdll::LdrGetDllHandleEx,
-                extern "stdcall" fn(u32, *const u16, *const u32, *const UnicodeString, *mut Handle) -> u32
-            )
-        };
-        let mut h = Handle::default();
-        let r = if s.as_bytes().iter().position(|v| *v == b'\\' || *v == b'/').is_some() {
-            func(f, ptr::null(), ptr::null(), &u, &mut h)
-        } else {
-            let d = winapi::system_dir();
-            func(f, d.as_ptr(), ptr::null(), &u, &mut h)
-        };
-        if r > 0 {
-            Err(winapi::nt_error(r))
-        } else {
-            Ok(h)
+        // Cache this in a temporary array
+        let t = s.encode_utf16().collect::<Blob<u16, 128>>();
+        {
+            GetModuleHandleExW(flags, &t)
         }
     } else {
-        Ok(unsafe { (*winapi::GetCurrentProcessPEB()).image_base_address })
+        Ok(winapi::GetCurrentProcessPEB().image_base_address)
     }
 }
 #[inline]
@@ -351,7 +464,7 @@ pub fn DisconnectNamedPipe(h: impl AsHandle) -> Win32Result<()> {
         );
         // 0x103 - STATUS_PENDING
         if r == 0x103 {
-            let _ = WaitForSingleAsHandle(h, -1, false); // IGNORE ERROR
+            ignore_error!(WaitForSingleObject(h, -1, false));
             t.status as u32
         } else {
             r
@@ -414,13 +527,13 @@ pub fn WaitNamedPipe(name: impl AsRef<str>, timeout: i32) -> Win32Result<()> {
         let mut p: Blob<u16, 256> = Blob::with_capacity(0xD + k.len_as_bytes());
         p.write_item(FilePipeWait::new(
             timeout,
-            cmp::min(k.len(), u32::MAX as usize) as u32,
+            cmp::min(k.len(), 0xFFFFFFFF) as u32,
         ));
         p.extend_from_slice(&k);
         // 0x000003 - FILE_SHARE_READ | FILE_SHARE_WRITE
         // 0x000020 - FILE_SYNCHRONOUS_IO_NONALERT
         // 0x100080 - FILE_READ_ATTRIBUTES | SYNCHRONIZE
-        let h = NtCreateFile(n, winapi::INVALID, 0x100080, None, 0, 0x3, 0, 0x20)?;
+        let h = NtCreateFile(n, Handle::INVALID, 0x100080, None, 0, 0x3, 0, 0x20)?;
         let mut t = IoStatusBlock::default();
         winapi::syscall!(
             *ntdll::NtFsControlFile,
@@ -432,7 +545,7 @@ pub fn WaitNamedPipe(name: impl AsRef<str>, timeout: i32) -> Win32Result<()> {
             &mut t,
             0x110018, // 0x110018 - FSCTL_PIPE_WAIT
             p.as_ptr(),
-            cmp::min(p.len_as_bytes(), u32::MAX as usize) as u32,
+            cmp::min(p.len_as_bytes(), 0xFFFFFFFF) as u32,
             ptr::null_mut(),
             0
         )
@@ -464,7 +577,7 @@ pub fn ConnectNamedPipe(h: impl AsHandle, olp: OverlappedIo) -> Win32Result<()> 
         );
         // 0x103 - STATUS_PENDING
         if r == 0x103 && w {
-            let _ = WaitForSingleAsHandle(h, -1, false); // IGNORE ERROR
+            ignore_error!(WaitForSingleObject(h, -1, false));
             x.internal as u32
         } else {
             r
@@ -484,7 +597,7 @@ pub fn CreatePipe(sa: SecAttrs, size: u32) -> Win32Result<(OwnedHandle, OwnedHan
             extern "stdcall" fn(*mut Handle, u32, *const ObjectAttributes, *mut IoStatusBlock, u32, u32, u32, u32, u32, u32, i32, u32, u32, *const i64) -> u32
         )
     };
-    let d = -500000;
+    let d = -500000i64;
     let p = winapi::GetCurrentProcessID();
     let b = crypt::get_or(0, r"\Device\NamedPipe\Win32Pipes.");
     // \Device\NamedPipe\Win32Pipes.%08x.%08x
@@ -506,7 +619,7 @@ pub fn CreatePipe(sa: SecAttrs, size: u32) -> Win32Result<(OwnedHandle, OwnedHan
         }
         object_attrs!(
             buf.as_str(),
-            winapi::INVALID,
+            Handle::INVALID,
             false,
             0x40, // 0x40 - OBJ_CASE_INSENSITIVE
             sa,
@@ -545,7 +658,7 @@ pub fn CreatePipe(sa: SecAttrs, size: u32) -> Win32Result<(OwnedHandle, OwnedHan
     let r = unsafe {
         object_attrs!(
             buf.as_str(),
-            winapi::INVALID,
+            Handle::INVALID,
             false,
             0x40, // 0x40 - OBJ_CASE_INSENSITIVE
             sa,
@@ -587,7 +700,7 @@ pub fn CreateNamedPipe(name: impl AsRef<str>, mode: u32, pipe_mode: u32, max: u3
     // 0x100000 - SYNCHRONIZE
     let mut a = 0x100000 | (mode & 0x10C0000);
     let (mut m, mut s) = (0u32, 0u32);
-    if mode & 0x80000000 > 0 {
+    if mode & 0x80000000 != 0 {
         // 0x80000000 - FILE_FLAG_WRITE_THROUGH
         //
         // NOTE(dij): De-compiling kernelbase.dll on Win10 seems to suggest that
@@ -596,26 +709,26 @@ pub fn CreateNamedPipe(name: impl AsRef<str>, mode: u32, pipe_mode: u32, max: u3
         //
         m |= 0x2; // 0x2 - FILE_WRITE_THROUGH
     }
-    if mode & 0x40000000 > 0 {
+    if mode & 0x40000000 != 0 {
         // 0x40000000 - FILE_FLAG_OVERLAPPED
         m |= 0x20; // 0x20- FILE_SYNCHRONOUS_IO_NONALERT
     }
-    if mode & 0x2 > 0 {
+    if mode & 0x2 != 0 {
         // 0x2 - PIPE_ACCESS_OUTBOUND
         s |= 0x1; // 0x1 - FILE_SHARE_READ
         a |= 0x40000000; // 0x40000000 - GENERIC_WRITE
     }
-    if mode & 0x1 > 0 {
+    if mode & 0x1 != 0 {
         // 0x1 - PIPE_ACCESS_INBOUND
         s |= 0x2; // 0x2 - FILE_SHARE_WRITE
         a |= 0x80000000; // 0x80000000 - GENERIC_READ
     }
-    let w_mode = if pipe_mode & 0x4 > 0 {
+    let w_mode = if pipe_mode & 0x4 != 0 {
         // PIPE_TYPE_MESSAGE
         0x1 // FILE_PIPE_MESSAGE_TYPE
     } else {
         0 // FILE_PIPE_BYTE_STREAM_TYPE
-    } | if winapi::is_min_windows_vista() && pipe_mode & 0x8 > 0 {
+    } | if winapi::is_min_windows_vista() && pipe_mode & 0x8 != 0 {
         0x2
     } else {
         0
@@ -623,14 +736,14 @@ pub fn CreateNamedPipe(name: impl AsRef<str>, mode: u32, pipe_mode: u32, max: u3
     // 0x8 - PIPE_REJECT_REMOTE_CLIENTS
     //       The 0x2 is the NT flag for this and will cause any Xp pipe operations
     //       to fail, so we only add it if we're >= Vista.
-    let r_mode = if pipe_mode & 0x2 > 0 {
+    let r_mode = if pipe_mode & 0x2 != 0 {
         // PIPE_READMODE_MESSAGE
         0x1 // FILE_PIPE_MESSAGE_MODE
     } else {
         // FILE_PIPE_BYTE_STREAM_MODE
         0
     };
-    let b_mode = if pipe_mode & 0x1 > 0 {
+    let b_mode = if pipe_mode & 0x1 != 0 {
         // PIPE_NOWAIT
         0x1 // FILE_PIPE_COMPLETE_OPERATION
     } else {
@@ -640,7 +753,7 @@ pub fn CreateNamedPipe(name: impl AsRef<str>, mode: u32, pipe_mode: u32, max: u3
     let t_mode = if timeout_micro > 0 {
         (timeout_micro as i64).wrapping_mul(-10)
     } else {
-        -500000
+        -500000i64
     };
     let p_max = match max {
         0xFF => -1,
@@ -668,7 +781,7 @@ pub fn CreateNamedPipe(name: impl AsRef<str>, mode: u32, pipe_mode: u32, max: u3
             &mut i,
             s,
             // 0x80000 - FILE_FLAG_FIRST_PIPE_INSTANCE
-            if mode & 0x80000 > 0 { 0x2 } else { 0x3 }, // 0x2 - FILE_CREATE | 0x3 - FILE_OPEN_IF
+            if mode & 0x80000 != 0 { 0x2 } else { 0x3 }, // 0x2 - FILE_CREATE | 0x3 - FILE_OPEN_IF
             m,
             w_mode,
             r_mode,
@@ -753,13 +866,13 @@ pub fn NtEnumerateKey(key: Key, index: u32) -> Win32Result<Option<RegKeyBasicInf
     winapi::init_ntdll();
     let mut i = RegKeyBasicInfo::default();
     let r = unsafe {
-        let mut d = 0;
+        let mut d = 0u32;
         winapi::syscall!(
             *ntdll::NtEnumerateKey,
             extern "stdcall" fn(Key, u32, u32, *mut RegKeyBasicInfo, u32, *mut u32) -> u32,
             key,
             index,
-            0x0, // 0x0 - KeyBasicInformation
+            0, // 0x0 - KeyBasicInformation
             &mut i,
             0x210, // RegKeyBasicInfo has a fixed size of 0x210.
             &mut d
@@ -782,7 +895,7 @@ pub fn NtOpenKey(root: Key, subkey: impl MaybeString, opts: u32, access: u32) ->
             subkey.into_string(),
             root.0,
             false,
-            0x40 | if opts & 0x8 > 0 { 0x100 } else { 0 },
+            0x40 | if opts & 0x8 != 0 { 0x100 } else { 0 },
             None,
             None,
             _n,
@@ -834,7 +947,7 @@ pub fn NtQueryValueKey(key: Key, value: impl MaybeString, size: u32) -> Win32Res
                     b.truncate(x as usize);
                     break t;
                 },
-                _ => return Err(Win32Error::Code(r)),
+                _ => return Err(winapi::nt_error(r)),
             }
         }
     };
@@ -898,7 +1011,7 @@ pub fn NtCreateKey(root: Key, subkey: impl AsRef<str>, class: impl MaybeString, 
             subkey.as_ref(),
             root.0,
             false,
-            0x40 | if opts & 0x8 > 0 { 0x100 } else { 0 },
+            0x40 | if opts & 0x8 != 0 { 0x100 } else { 0 },
             sa,
             None,
             _n,
@@ -972,7 +1085,22 @@ pub fn CreateMailslot(name: impl AsRef<str>, max_message: u32, timeout: i32, sa:
 /////////////////////////////////////
 #[inline]
 pub fn RtlFreeUnicodeString(v: &UnicodeString) {
-    HeapFree(winapi::GetProcessHeap(), v.buffer.as_ptr()); // IGNORE ERROR
+    ignore_error!(HeapFree(winapi::GetProcessHeap(), v.buffer.as_ptr()));
+}
+pub fn HeapDestroy(h: impl AsHandle) -> Win32Result<()> {
+    winapi::init_ntdll();
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::RtlDestroyHeap,
+            extern "stdcall" fn(Handle) -> Handle,
+            h.as_handle()
+        )
+    };
+    if r.is_invalid() {
+        Ok(())
+    } else {
+        Err(winapi::last_error())
+    }
 }
 #[inline]
 pub fn HeapFree<T>(h: impl AsHandle, v: *const T) -> bool {
@@ -987,7 +1115,7 @@ pub fn HeapFree<T>(h: impl AsHandle, v: *const T) -> bool {
         ) == 1
     }
 }
-pub fn HeapAlloc(h: impl AsHandle, s: usize, zeroed: bool) -> Win32Result<usize> {
+pub fn HeapAlloc(h: impl AsHandle, s: usize, zeroed: bool) -> Win32Result<Region> {
     winapi::init_ntdll();
     let r = unsafe {
         winapi::syscall!(
@@ -999,6 +1127,44 @@ pub fn HeapAlloc(h: impl AsHandle, s: usize, zeroed: bool) -> Win32Result<usize>
         )
     };
     if r == 0 {
+        Err(winapi::last_error())
+    } else {
+        Ok(r.into())
+    }
+}
+pub fn HeapCreate(flags: u32, initial_size: usize, max_size: usize) -> Win32Result<Handle> {
+    winapi::init_ntdll();
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::RtlCreateHeap,
+            extern "stdcall" fn(u32, *const (), usize, usize, *const (), *const ()) -> Handle,
+            flags,
+            ptr::null(),
+            initial_size,
+            max_size,
+            ptr::null(),
+            ptr::null()
+        )
+    };
+    if r.is_invalid() {
+        Err(winapi::last_error())
+    } else {
+        Ok(r)
+    }
+}
+pub fn HeapReAlloc(h: impl AsHandle, flags: u32, mem: Region, size: usize) -> Win32Result<Region> {
+    winapi::init_ntdll();
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::RtlReAllocateHeap,
+            extern "stdcall" fn(Handle, u32, usize, usize) -> Region,
+            h.as_handle(),
+            flags,
+            mem.0,
+            size
+        )
+    };
+    if r.is_invalid() {
         Err(winapi::last_error())
     } else {
         Ok(r)
@@ -1050,7 +1216,7 @@ pub fn OpenMutex(access: u32, inherit: bool, name: impl AsRef<str>) -> Win32Resu
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name.as_ref()),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             None,
@@ -1078,7 +1244,7 @@ pub fn CreateMutex(sa: SecAttrs, inherit: bool, initial: bool, name: impl MaybeS
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             sa,
@@ -1163,7 +1329,7 @@ pub fn OpenEvent(access: u32, inherit: bool, name: impl AsRef<str>) -> Win32Resu
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name.as_ref()),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             None,
@@ -1191,7 +1357,7 @@ pub fn CreateEvent(sa: SecAttrs, inherit: bool, initial: bool, manual: bool, nam
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             sa,
@@ -1205,7 +1371,7 @@ pub fn CreateEvent(sa: SecAttrs, inherit: bool, initial: bool, manual: bool, nam
             &mut h,
             0x1F0003,
             &o,
-            if manual { 1 } else { 0 },
+            if manual { 0 } else { 1 },
             if initial { 1 } else { 0 }
         )
     };
@@ -1263,7 +1429,7 @@ pub fn OpenSemaphore(access: u32, inherit: bool, name: impl AsRef<str>) -> Win32
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name.as_ref()),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             None,
@@ -1291,7 +1457,7 @@ pub fn CreateSemaphore(sa: SecAttrs, inherit: bool, initial: u32, max: u32, name
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             sa,
@@ -1362,7 +1528,7 @@ pub fn OpenWaitableTimer(access: u32, inherit: bool, name: impl AsRef<str>) -> W
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name.as_ref()),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             None,
@@ -1390,7 +1556,7 @@ pub fn CreateWaitableTimer(sa: SecAttrs, inherit: bool, manual: bool, name: impl
     let r = unsafe {
         object_attrs!(
             winapi::fix_name(name),
-            winapi::INVALID,
+            Handle::INVALID,
             inherit,
             0,
             sa,
@@ -1499,6 +1665,25 @@ pub fn GetLogicalDrives() -> Win32Result<u32> {
     NtQueryInformationProcess(winapi::CURRENT_PROCESS, 0x17, buf.as_mut_ptr(), 0x24)?;
     Ok(buf[0])
 }
+pub fn NtQuerySystemInformation<T>(class: u32, buf: *mut T, size: u32) -> Win32Result<u32> {
+    winapi::init_ntdll();
+    let mut n: u32 = 0u32;
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtQuerySystemInformation,
+            extern "stdcall" fn(u32, *mut T, u32, *mut u32) -> u32,
+            class,
+            buf,
+            size,
+            &mut n
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(n)
+    }
+}
 
 /////////////////////////////////////
 // Environment Functions
@@ -1549,7 +1734,7 @@ pub fn SetEnvironmentVariable(key: impl AsRef<str>, value: impl MaybeString) -> 
 pub fn GetThreadID(h: impl AsHandle) -> Win32Result<u32> {
     let mut i = ThreadBasicInfo::default();
     // 0x0 - ThreadBasicInformation
-    NtQueryInformationThread(h, 0, &mut i, mem::size_of::<ThreadBasicInfo>() as u32)?;
+    NtQueryInformationThread(h, 0, &mut i, size_of::<ThreadBasicInfo>() as u32)?;
     Ok(i.client_id.thread as u32)
 }
 pub fn ResumeThread(h: impl AsHandle) -> Win32Result<u32> {
@@ -1590,7 +1775,7 @@ pub fn SuspendThread(h: impl AsHandle) -> Win32Result<u32> {
 pub fn GetExitCodeThread(h: impl AsHandle) -> Win32Result<u32> {
     let mut i = ThreadBasicInfo::default();
     // 0x0 - ThreadBasicInformation
-    NtQueryInformationThread(h, 0, &mut i, mem::size_of::<ThreadBasicInfo>() as u32)?;
+    NtQueryInformationThread(h, 0, &mut i, size_of::<ThreadBasicInfo>() as u32)?;
     Ok(i.exit_status)
 }
 pub fn TerminateThread(h: impl AsHandle, code: u32) -> Win32Result<()> {
@@ -1615,7 +1800,7 @@ pub fn OpenThread(access: u32, inherit: bool, tid: u32) -> Win32Result<OwnedHand
     let r = unsafe {
         let c = ClientID {
             thread:  tid as usize,
-            process: 0,
+            process: 0usize,
         };
         let o = ObjectAttributes::new(None, inherit, 0, None, None);
         winapi::syscall!(
@@ -1631,6 +1816,24 @@ pub fn OpenThread(access: u32, inherit: bool, tid: u32) -> Win32Result<OwnedHand
         Err(winapi::nt_error(r))
     } else {
         Ok(h.into())
+    }
+}
+pub fn NtSetInformationThread<T>(h: impl AsHandle, class: u32, buf: *const T, size: u32) -> Win32Result<()> {
+    winapi::init_ntdll();
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtSetInformationThread,
+            extern "stdcall" fn(Handle, u32, *const T, u32) -> u32,
+            h.as_handle(),
+            class,
+            buf,
+            size
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(())
     }
 }
 pub fn NtQueryInformationThread<T>(h: impl AsHandle, class: u32, buf: *mut T, size: u32) -> Win32Result<u32> {
@@ -1651,6 +1854,23 @@ pub fn NtQueryInformationThread<T>(h: impl AsHandle, class: u32, buf: *mut T, si
         Err(winapi::nt_error(r))
     } else {
         Ok(n)
+    }
+}
+pub fn NtImpersonateThread(h: impl AsHandle, src: impl AsHandle, s: &SecurityQualityOfService) -> Win32Result<()> {
+    winapi::init_ntdll();
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtImpersonateThread,
+            extern "stdcall" fn(Handle, Handle, *const SecurityQualityOfService) -> u32,
+            h.as_handle(),
+            src.as_handle(),
+            s
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(())
     }
 }
 pub fn CreateThreadEx(h: impl AsHandle, stack_size: usize, start: usize, args: usize, suspended: bool) -> Win32Result<OwnedHandle> {
@@ -1711,7 +1931,7 @@ pub fn CreateThreadEx(h: impl AsHandle, stack_size: usize, start: usize, args: u
 pub fn GetProcessID(h: impl AsHandle) -> Win32Result<u32> {
     let mut i = ProcessBasicInfo::default();
     // 0x0 - ProcessBasicInformation
-    NtQueryInformationProcess(h, 0, &mut i, mem::size_of::<ProcessBasicInfo>() as u32)?;
+    NtQueryInformationProcess(h, 0, &mut i, size_of::<ProcessBasicInfo>() as u32)?;
     Ok(i.process_id as u32)
 }
 pub fn NtResumeProcess(h: impl AsHandle) -> Win32Result<()> {
@@ -1747,14 +1967,14 @@ pub fn NtSuspendProcess(h: impl AsHandle) -> Win32Result<()> {
 pub fn IsWoW64Process(h: impl AsHandle) -> Win32Result<bool> {
     winapi::init_ntdll();
     if !winapi::is_min_windows_7() {
-        let mut v: u32 = 0u32;
-        // 0x1A - ProcessWow64Information
+        let mut v: u32 = 0u32; // <- PEB64 Address
+                               // 0x1A - ProcessWow64Information
         NtQueryInformationProcess(h, 0x1A, &mut v, 4)?;
         return Ok(v > 0);
     }
     // TODO(dij): Test this as we might not need to do this below and the Nt call
     //            seems to be called by the Rtl function.
-    if ntdll::RtlWow64GetProcessMachines == false {
+    if !ntdll::RtlWow64GetProcessMachines.is_loaded() {
         return Ok(false);
     }
     let (mut p, mut n) = (0u16, 0u16);
@@ -1777,7 +1997,7 @@ pub fn IsWoW64Process(h: impl AsHandle) -> Win32Result<bool> {
 pub fn GetExitCodeProcess(h: impl AsHandle) -> Win32Result<u32> {
     let mut i = ProcessBasicInfo::default();
     // 0x0 - ProcessBasicInformation
-    NtQueryInformationProcess(h, 0, &mut i, mem::size_of::<ProcessBasicInfo>() as u32)?;
+    NtQueryInformationProcess(h, 0, &mut i, size_of::<ProcessBasicInfo>() as u32)?;
     Ok(i.exit_status)
 }
 pub fn GetProcessFileName(h: impl AsHandle) -> Win32Result<String> {
@@ -1789,7 +2009,7 @@ pub fn GetProcessFileName(h: impl AsHandle) -> Win32Result<String> {
         )
     };
     let v = h.as_handle();
-    let mut n = 0x20A;
+    let mut n = 0x20Au32;
     let mut b: Blob<u16, 300> = Blob::new();
     loop {
         b.resize_as_bytes(n as usize);
@@ -1805,16 +2025,12 @@ pub fn GetProcessFileName(h: impl AsHandle) -> Win32Result<String> {
     // for the process.
     //
     // First u16 is the 'length' value.
-    unsafe {
-        let y = cmp::min(n as usize, b.len());
-        // SAFETY: The size of the Buffer is dictated by the OS and compared by us
-        // before slicing.
-        let s = b.get_unchecked(winapi::PTR_SIZE..(y / 2) - 1);
-        let t = cmp::min(y, b[0] as usize) / 2;
-        match s.iter().rposition(|v| *v == b'\\' as u16) {
-            Some(i) => Ok((s.get_unchecked(i + 1..t)).decode_utf16()),
-            None => Ok((s.get_unchecked(0..t)).decode_utf16()),
-        }
+    let y = cmp::min(n as usize, b.len());
+    let s = &b[winapi::PTR_SIZE..(y / 2) - 1];
+    let t = cmp::min(y, b[0] as usize) / 2;
+    match s.iter().rposition(|v| *v == b'\\' as u16) {
+        Some(i) => Ok((&s[i + 1..t]).decode_utf16()),
+        None => Ok((&s[0..t]).decode_utf16()),
     }
 }
 pub fn TerminateProcess(h: impl AsHandle, code: u32) -> Win32Result<()> {
@@ -1833,12 +2049,18 @@ pub fn TerminateProcess(h: impl AsHandle, code: u32) -> Win32Result<()> {
         Ok(())
     }
 }
+#[inline]
+pub fn CheckRemoteDebuggerPresent(h: impl AsHandle) -> Win32Result<bool> {
+    let mut r = 0usize;
+    winapi::NtQueryInformationProcess(h, 0x7, &mut r, PTR_SIZE as u32)?;
+    Ok(r > 0)
+}
 pub fn OpenProcess(access: u32, inherit: bool, pid: u32) -> Win32Result<OwnedHandle> {
     winapi::init_ntdll();
     let mut h = Handle::default();
     let r = unsafe {
         let c = ClientID {
-            thread:  0,
+            thread:  0usize,
             process: pid as usize,
         };
         let o = ObjectAttributes::new(None, inherit, 0, None, None);
@@ -1897,6 +2119,31 @@ pub fn NtQueryInformationProcess<T>(h: impl AsHandle, class: u32, buf: *mut T, s
 }
 
 /////////////////////////////////////
+// Process Functions (WoW64)
+/////////////////////////////////////
+#[cfg(not(target_pointer_width = "64"))]
+pub fn NtWow64QueryInformationProcess64<T>(h: impl AsHandle, class: u32, buf: *mut T, size: u32) -> Win32Result<u32> {
+    winapi::init_ntdll();
+    let mut n = 0u32;
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtWow64QueryInformationProcess64,
+            extern "stdcall" fn(Handle, u32, *mut T, u32, *mut u32) -> u32,
+            h.as_handle(),
+            class,
+            buf,
+            size,
+            &mut n
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(n)
+    }
+}
+
+/////////////////////////////////////
 // IO/Async Functions
 /////////////////////////////////////
 pub fn CancelIoEx(h: impl AsHandle, olp: &mut Overlapped) -> Win32Result<()> {
@@ -1933,19 +2180,20 @@ pub fn GetOverlappedResult(h: impl AsHandle, olp: &Overlapped, wait: bool) -> Wi
         if !wait {
             return Err(Win32Error::IoPending);
         }
-        WaitForSingleAsHandle(
+        WaitForSingleObject(
             if olp.event.0 > 0 { olp.event } else { h.as_handle() },
             -1,
             true,
         )?;
     }
-    if olp.internal > 0 {
-        Err(winapi::nt_error(olp.internal as u32))
-    } else {
-        Ok(olp.internal_high)
+    match olp.internal {
+        // 0xC0000011 - STATUS_END_OF_FILE
+        0xC0000011 => Ok(0),
+        0 => Ok(olp.internal_high),
+        _ => Err(winapi::nt_error(olp.internal as u32)),
     }
 }
-pub fn WaitForSingleAsHandle(h: impl AsHandle, microseconds: i32, alertable: bool) -> Win32Result<u32> {
+pub fn WaitForSingleObject(h: impl AsHandle, microseconds: i32, alertable: bool) -> Win32Result<u32> {
     winapi::init_ntdll();
     let r = unsafe {
         let t = (microseconds as i64).wrapping_mul(-10);
@@ -1966,7 +2214,7 @@ pub fn WaitForSingleAsHandle(h: impl AsHandle, microseconds: i32, alertable: boo
         _ => Err(winapi::nt_error(r)),
     }
 }
-pub fn WaitForMultipleAsHandles<T: AsHandle>(h: &[T], size: usize, all: bool, microseconds: i32, alertable: bool) -> Win32Result<u32> {
+pub fn WaitForMultipleObjects<T: AsHandle>(h: &[T], size: usize, all: bool, microseconds: i32, alertable: bool) -> Win32Result<u32> {
     if h.len() > 64 || size == 0 {
         return Err(Win32Error::InvalidArgument);
     }
@@ -1983,24 +2231,15 @@ pub fn WaitForMultipleAsHandles<T: AsHandle>(h: &[T], size: usize, all: bool, mi
 /////////////////////////////////////
 // Token Functions
 /////////////////////////////////////
+#[inline]
+pub fn RevertToSelf() -> Win32Result<()> {
+    SetThreadToken(winapi::CURRENT_THREAD, Handle::INVALID)
+}
+#[inline]
 pub fn SetThreadToken(h: impl AsHandle, token: impl AsHandle) -> Win32Result<()> {
-    winapi::init_ntdll();
-    let r = unsafe {
-        let t = token.as_handle();
-        winapi::syscall!(
-            *ntdll::NtSetInformationThread,
-            extern "stdcall" fn(Handle, u32, *const Handle, u32) -> u32,
-            h.as_handle(),
-            0x5, // 0x5 - ThreadImpersonationToken
-            &t,
-            winapi::PTR_SIZE as u32
-        )
-    };
-    if r > 0 {
-        Err(winapi::nt_error(r))
-    } else {
-        Ok(())
-    }
+    let t = token.as_handle();
+    // 0x5 - ThreadImpersonationToken
+    NtSetInformationThread(h, 0x5, &t, winapi::PTR_SIZE as u32)
 }
 pub fn OpenProcessToken(h: impl AsHandle, access: u32) -> Win32Result<OwnedHandle> {
     winapi::init_ntdll();
@@ -2041,7 +2280,7 @@ pub fn OpenThreadToken(h: impl AsHandle, access: u32, s: bool) -> Win32Result<Ow
 }
 pub fn GetTokenInformation<T>(h: impl AsHandle, class: u32, buf: *mut T, size: u32) -> Win32Result<u32> {
     winapi::init_ntdll();
-    let mut n = 0u32;
+    let mut n = size;
     let r = unsafe {
         winapi::syscall!(
             *ntdll::NtQueryInformationToken,
@@ -2053,7 +2292,10 @@ pub fn GetTokenInformation<T>(h: impl AsHandle, class: u32, buf: *mut T, size: u
             &mut n
         )
     };
-    if r > 0 {
+    // 0xC0000023 - STATUS_BUFFER_TOO_SMALL
+    if r == 0xC0000023 && n > 0 {
+        Ok(n)
+    } else if r > 0 {
         Err(winapi::nt_error(r))
     } else {
         Ok(n)
@@ -2165,16 +2407,19 @@ pub fn NtProtectVirtualMemory(h: impl AsHandle, address: Region, size: u32, acce
         Ok(s)
     }
 }
-pub fn NtWriteVirtualMemory<T>(h: impl AsHandle, address: Region, size: usize, buf: T) -> Win32Result<usize> {
+pub fn NtReadVirtualMemory<T>(h: impl AsHandle, address: Region, size: usize, to: ReadInto<T>) -> Win32Result<usize> {
     winapi::init_ntdll();
-    let mut s = 0;
+    let mut s = 0usize;
     let r = unsafe {
         winapi::syscall!(
-            *ntdll::NtWriteVirtualMemory,
-            extern "stdcall" fn(Handle, Region, *const T, usize, *mut usize) -> u32,
+            *ntdll::NtReadVirtualMemory,
+            extern "stdcall" fn(Handle, Region, *mut T, usize, *mut usize) -> u32,
             h.as_handle(),
             address,
-            &buf,
+            match to {
+                ReadInto::Direct(v) => v,
+                ReadInto::Pointer(p) => p,
+            },
             size,
             &mut s
         )
@@ -2185,16 +2430,20 @@ pub fn NtWriteVirtualMemory<T>(h: impl AsHandle, address: Region, size: usize, b
         Ok(s)
     }
 }
-pub fn NtReadVirtualMemory<T>(h: impl AsHandle, address: Region, size: usize, buf: &mut T) -> Win32Result<usize> {
+pub fn NtWriteVirtualMemory<T>(h: impl AsHandle, address: Region, size: usize, from: WriteFrom<T>) -> Win32Result<usize> {
     winapi::init_ntdll();
-    let mut s = 0;
+    let mut s = 0usize;
     let r = unsafe {
         winapi::syscall!(
-            *ntdll::NtReadVirtualMemory,
-            extern "stdcall" fn(Handle, Region, *mut T, usize, *mut usize) -> u32,
+            *ntdll::NtWriteVirtualMemory,
+            extern "stdcall" fn(Handle, Region, *const T, usize, *mut usize) -> u32,
             h.as_handle(),
             address,
-            buf,
+            match from {
+                WriteFrom::Null => ptr::null(),
+                WriteFrom::Direct(v) => v,
+                WriteFrom::Pointer(p) => p,
+            },
             size,
             &mut s
         )
@@ -2213,6 +2462,82 @@ pub fn NtAllocateVirtualMemory(h: impl AsHandle, base: Region, size: usize, flag
         winapi::syscall!(
             *ntdll::NtAllocateVirtualMemory,
             extern "stdcall" fn(Handle, *mut Region, usize, *mut usize, u32, u32) -> u32,
+            h.as_handle(),
+            &mut a,
+            0,
+            &mut s,
+            flags,
+            access
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(a)
+    }
+}
+
+/////////////////////////////////////
+// Virtual Memory Functions (WoW64)
+/////////////////////////////////////
+#[cfg(not(target_pointer_width = "64"))]
+pub fn NtWoW64ReadVirtualMemory64<T>(h: impl AsHandle, address: u64, size: u64, to: ReadInto<T>) -> Win32Result<u64> {
+    winapi::init_ntdll();
+    let mut s = 0u64;
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtWow64ReadVirtualMemory64,
+            extern "stdcall" fn(Handle, u64, *mut T, u64, *mut u64) -> u32,
+            h.as_handle(),
+            address,
+            match to {
+                ReadInto::Direct(v) => v,
+                ReadInto::Pointer(p) => p,
+            },
+            size,
+            &mut s
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(s)
+    }
+}
+#[cfg(not(target_pointer_width = "64"))]
+pub fn NtWoW64WriteVirtualMemory64<T>(h: impl AsHandle, address: u64, size: u64, from: WriteFrom<T>) -> Win32Result<u64> {
+    winapi::init_ntdll();
+    let mut s = 0u64;
+    let r = unsafe {
+        winapi::syscall!(
+            *ntdll::NtWow64WriteVirtualMemory64,
+            extern "stdcall" fn(Handle, u64, *const T, u64, *mut u64) -> u32,
+            h.as_handle(),
+            address,
+            match from {
+                WriteFrom::Null => ptr::null(),
+                WriteFrom::Direct(v) => v,
+                WriteFrom::Pointer(p) => p,
+            },
+            size,
+            &mut s
+        )
+    };
+    if r > 0 {
+        Err(winapi::nt_error(r))
+    } else {
+        Ok(s)
+    }
+}
+#[cfg(not(target_pointer_width = "64"))]
+pub fn NtWoW64AllocateVirtualMemory64(h: impl AsHandle, base: u64, size: u64, flags: u32, access: u32) -> Win32Result<u64> {
+    winapi::init_ntdll();
+    let mut a = base;
+    let r = unsafe {
+        let mut s = size;
+        winapi::syscall!(
+            *ntdll::NtWow64AllocateVirtualMemory64,
+            extern "stdcall" fn(Handle, *mut u64, u64, *mut u64, u32, u32) -> u32,
             h.as_handle(),
             &mut a,
             0,
@@ -2272,7 +2597,7 @@ pub fn NtCreateSection(access: u32, max_size: Option<u64>, protection: u32, attr
 }
 pub fn NtMapViewOfSection(sec: impl AsHandle, proc: impl AsHandle, offset: usize, size: usize, inherit: u32, alloc_type: u32, access: u32) -> Win32Result<(usize, usize)> {
     winapi::init_ntdll();
-    let (mut h, mut s) = (0, size);
+    let (mut h, mut s) = (0usize, size);
     let r = unsafe {
         let mut o = offset;
         winapi::syscall!(
@@ -2305,7 +2630,7 @@ pub fn DeleteFile(file: impl AsRef<str>) -> Win32Result<()> {
     // 0x10000 - DELETE
     // 0x00004 - FILE_SHARE_DELETE
     // 0x00001 - FILE_OPEN
-    let h = winapi::NtCreateFile(file, winapi::INVALID, 0x10000, None, 0, 0x4, 0x1, 0)?;
+    let h = winapi::NtCreateFile(file, Handle::INVALID, 0x10000, None, 0, 0x4, 0x1, 0)?;
     // 0xD - FileDispositionInformation
     let v = 1u32;
     NtSetInformationFile(h, 0xD, &v, 4)?;
@@ -2318,10 +2643,10 @@ pub fn CreateHardLink<T: AsRef<str>>(original: T, link: T) -> Win32Result<()> {
             .collect::<Blob<u16, 256>>();
         let mut b: Blob<u16, 256> = Blob::with_capacity(0x14 + o.len());
         b.write_item(FileLinkInformation {
-            pad:            0,
-            replace:        0,
-            name_length:    cmp::min(o.len_as_bytes(), u32::MAX as usize) as u32, // Length, in bytes, of the file name string.
-            root_directory: 0,
+            pad:            0u32,
+            replace:        0u32,
+            name_length:    cmp::min(o.len_as_bytes(), 0xFFFFFFFF) as u32, // Length, in bytes, of the file name string.
+            root_directory: 0usize,
         });
         b.extend_from_slice(&o);
         // 0x100100 - SYNCHRONIZE | FILE_WRITE_ATTRIBUTES
@@ -2333,7 +2658,7 @@ pub fn CreateHardLink<T: AsRef<str>>(original: T, link: T) -> Win32Result<()> {
             h,
             0xB,
             b.as_ptr(),
-            cmp::min(b.len_as_bytes(), u32::MAX as usize) as u32,
+            cmp::min(b.len_as_bytes(), 0xFFFFFFFF) as u32,
         )?;
         Ok(())
     }
@@ -2350,7 +2675,7 @@ pub fn CreateDirectory(path: impl AsRef<str>, recurse: bool) -> Win32Result<()> 
         // 0x204021 - FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
         //             FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT
         // 0x000002 - FILE_CREATE
-        NtCreateFile(path, winapi::INVALID, 0x100001, None, 0x80, 3, 2, 0x204021)?;
+        NtCreateFile(path, Handle::INVALID, 0x100001, None, 0x80, 3, 2, 0x204021)?;
         return Ok(());
     }
     let n = winapi::normalize_path_to_nt(path);
@@ -2369,7 +2694,7 @@ pub fn CreateDirectory(path: impl AsRef<str>, recurse: bool) -> Win32Result<()> 
             // 0x204021 - FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
             //             FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT
             // 0x000003 - FILE_OPEN_IF
-            NtCreateFile(&b, winapi::INVALID, 0x100001, None, 0x80, 3, 0x3, 0x204021)?;
+            NtCreateFile(&b, Handle::INVALID, 0x100001, None, 0x80, 3, 0x3, 0x204021)?;
         }
         // Let's pass the drive path before attempting to create anything as this
         // should be the full path.
@@ -2386,17 +2711,17 @@ pub fn WriteFile(h: impl AsHandle, buf: &[u8], olp: OverlappedIo) -> Win32Result
 pub fn SetFilePointerEx(h: impl AsHandle, distance: i64, method: u32) -> Win32Result<u64> {
     let n = match method {
         // FILE_BEGIN
-        0x0 => distance as u64,
+        0 => distance as u64,
         // FILE_CURRENT
-        0x1 => {
+        1 => {
             let mut n = 0i64;
             // 0xE - FilePositionInformation
             NtQueryInformationFile(&h, 0xE, &mut n, 8)?;
             (n + distance) as u64
         },
         // FILE_END
-        0x2 => {
-            let mut i = FileStandardInfo::default();
+        2 => {
+            let mut i = FileStandardInformation::default();
             // 0x5 - FileStandardInfo
             NtQueryInformationFile(&h, 0x5, &mut i, 0x20)?;
             (i.end_of_file as i64 + distance) as u64
@@ -2414,7 +2739,7 @@ pub fn ReadFile(h: impl AsHandle, buf: &mut [u8], olp: OverlappedIo) -> Win32Res
 #[inline]
 pub fn CreateFile(file: impl AsRef<str>, access: u32, share_mode: u32, sa: SecAttrs, disposition: u32, attrs: u32) -> Win32Result<OwnedHandle> {
     let (a, v, d, f) = winapi::std_flags_to_nt(access, disposition, attrs);
-    NtCreateFile(file, winapi::INVALID, a, sa, v, share_mode, d, f)
+    NtCreateFile(file, Handle::INVALID, a, sa, v, share_mode, d, f)
 }
 
 /////////////////////////////////////
@@ -2491,13 +2816,14 @@ pub fn NtWriteFile(h: impl AsHandle, olp: OverlappedIo, buf: &[u8], offset: Opti
                 (false, v)
             },
         );
-        let o = if offset.is_some() && x.offset == 0 && x.offset_high == 0 {
+        let o = if offset.is_some() {
+            //&& x.offset == 0 && x.offset_high == 0 {
             let t = offset.unwrap_or_default();
             x.offset = (t & 0xFFFFFFFF) as u32;
-            x.offset_high = (t >> 4) as u32;
+            x.offset_high = (t >> 32) as u32;
             t
         } else {
-            ((x.offset_high as u64) << 4) | x.offset as u64
+            ((x.offset_high as u64) << 32) | x.offset as u64
         };
         let r = winapi::syscall!(
             *ntdll::NtWriteFile,
@@ -2505,16 +2831,16 @@ pub fn NtWriteFile(h: impl AsHandle, olp: OverlappedIo, buf: &[u8], offset: Opti
             winapi::check_nt_handle(h.as_handle()),
             x.event.0,
             0,
-            if x.event.0 & 1 == 0 { x } else { ptr::null_mut() },
+            if x.event.0 & 1 == 0 { ptr::null_mut() } else { x },
             x,
             buf.as_ptr(),
-            cmp::min(buf.len(), u32::MAX as usize) as u32,
+            cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             if offset.is_some() { &o } else { ptr::null() },
             0
         );
         // 0x103 - STATUS_PENDING
         let z = if r == 0x103 && w {
-            let _ = WaitForSingleAsHandle(h, -1, false); // IGNORE ERROR
+            ignore_error!(WaitForSingleObject(h, -1, false));
             x.internal as u32
         } else {
             r
@@ -2538,13 +2864,13 @@ pub fn NtReadFile(h: impl AsHandle, olp: OverlappedIo, buf: &mut [u8], offset: O
                 (false, v)
             },
         );
-        let o = if offset.is_some() && x.offset == 0 && x.offset_high == 0 {
+        let o = if offset.is_some() {
             let t = offset.unwrap_or_default();
             x.offset = (t & 0xFFFFFFFF) as u32;
-            x.offset_high = (t >> 4) as u32;
+            x.offset_high = (t >> 32) as u32;
             t
         } else {
-            ((x.offset_high as u64) << 4) | x.offset as u64
+            ((x.offset_high as u64) << 32) | x.offset as u64
         };
         let r = winapi::syscall!(
             *ntdll::NtReadFile,
@@ -2552,16 +2878,16 @@ pub fn NtReadFile(h: impl AsHandle, olp: OverlappedIo, buf: &mut [u8], offset: O
             winapi::check_nt_handle(h.as_handle()),
             x.event.0,
             0,
-            if x.event.0 & 1 == 0 { x } else { ptr::null_mut() },
+            if x.event.0 & 1 == 0 { ptr::null_mut() } else { x },
             x,
             buf.as_mut_ptr(),
-            cmp::min(buf.len(), u32::MAX as usize) as u32,
+            cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             if offset.is_some() { &o } else { ptr::null() },
             0
         );
         // 0x103 - STATUS_PENDING
         let z = if r == 0x103 && w {
-            let _ = WaitForSingleAsHandle(h, -1, false); // IGNORE ERROR
+            ignore_error!(WaitForSingleObject(h, -1, false));
             x.internal as u32
         } else {
             r
@@ -2592,10 +2918,10 @@ pub fn NtQueryDirectoryFile(h: impl AsHandle, buf: &mut [u8], class: u32, single
             0,
             &mut i,
             buf.as_mut_ptr(),
-            cmp::min(buf.len(), u32::MAX as usize) as u32,
+            cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             class,
             if single { 1 } else { 0 },
-            if g.is_empty() { ptr::null() } else { g.as_ptr() },
+            g.as_null_or_ptr(),
             if restart { 1 } else { 0 }
         )
     };
@@ -2622,7 +2948,11 @@ pub fn NtCreateFile(file: impl AsRef<str>, root: Handle, access: u32, sa: SecAtt
             Some(&n.value),
             root,
             false,
-            if flags & 0x1000000 > 0 { 0 } else { 0x40 } | if share == 0 { 0x20 } else { 0 },
+            if flags & 0x1000000 != 0 { 0 } else { 0x40 },
+            // NOTE(dij): This 'OBJ_EXCLUSIVE' flag seems to cause problems?
+            //            looking at the calls Windows makes seems not to use it
+            //            either? Weird. When used throws "invalid argument".
+            // | if share == 0 { 0x20 } else { 0 },
             sa,
             None,
         );
@@ -2679,7 +3009,7 @@ pub fn NtDeviceIoControlFile<T, O>(h: impl AsHandle, code: u32, olp: OverlappedI
         );
         // 0x103 - STATUS_PENDING
         let z = if r == 0x103 && w {
-            let _ = WaitForSingleAsHandle(h, -1, false); // IGNORE ERROR
+            ignore_error!(WaitForSingleObject(h, -1, false));
             x.internal as u32
         } else {
             r
@@ -2712,7 +3042,7 @@ pub(crate) unsafe fn ldl_load_library(name: &UnicodeString) -> Win32Result<Handl
     }
 }
 pub(crate) unsafe fn ldl_load_address(h: Handle, ordinal: u16, name: &AnsiString) -> Win32Result<usize> {
-    let mut f = 0;
+    let mut f = 0usize;
     let r = winapi::syscall!(
         *ntdll::LdrGetProcedureAddress,
         extern "stdcall" fn(Handle, *const AnsiString, u16, *mut usize) -> u32,
@@ -2728,6 +3058,18 @@ pub(crate) unsafe fn ldl_load_address(h: Handle, ordinal: u16, name: &AnsiString
     }
 }
 
+#[inline]
+pub(crate) fn close_handle(h: Handle) {
+    if h.is_invalid() {
+        bugtrack!("winapi::CloseHandle(): CloseHandle on an invalid Handle!");
+        return;
+    }
+    winapi::init_ntdll();
+    let r = unsafe { winapi::syscall!(*ntdll::NtClose, extern "stdcall" fn(Handle) -> u32, h) };
+    if r > 0 {
+        bugtrack!("winapi::CloseHandle(): CloseHandle 0x{h:X} resulted in an error 0x{r:X}!");
+    }
+}
 pub(crate) fn wait_for_multiple_objects(h: &[usize], size: usize, all: bool, microseconds: i32, alertable: bool) -> Win32Result<u32> {
     // NOTE(dij): This function does NOT do the stdlib checks for Handles.
     //            Use the 'WaitForMultipleAsHandles' function for that.
@@ -2748,7 +3090,7 @@ pub(crate) fn wait_for_multiple_objects(h: &[usize], size: usize, all: bool, mic
         )
     };
     // STATUS_WAIT_0 .. STATUS_WAIT_63
-    if r == 0x0 || r < 64 {
+    if r == 0 || r < 64 {
         return Ok(r);
     }
     // 0x0C0 - STATUS_USER_APC
@@ -2764,7 +3106,7 @@ unsafe fn write_hex_padded(buf: &mut String, pad: usize, r: u32) {
     let s = buf.len();
     let m = buf.as_mut_vec();
     let mut b = [0u8; 11];
-    let mut i = 10;
+    let mut i = 10usize;
     m.resize(s + 10, 0);
     loop {
         let n = (r >> (4 * (10 - i))) as usize;

@@ -16,17 +16,19 @@
 
 #![no_implicit_prelude]
 
+pub use self::inner::unload;
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
 pub(crate) use self::inner::get_or;
-pub use self::inner::{init, unload};
 
 #[cfg(feature = "crypt")]
 mod inner {
     use core::cell::UnsafeCell;
     use core::ptr;
+    use core::str::from_utf8_unchecked;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::util::stx;
-    use crate::util::stx::prelude::*;
+    use crate::prelude::*;
 
     static MAPPER: Mapper = Mapper::new();
 
@@ -40,7 +42,7 @@ mod inner {
         #[inline]
         const fn new() -> Mapper<'a> {
             Mapper {
-                map:     UnsafeCell::new([unsafe { core::str::from_utf8_unchecked(&[]) }; 255]),
+                map:     UnsafeCell::new([unsafe { from_utf8_unchecked(&[]) }; 255]),
                 ready:   AtomicBool::new(false),
                 backing: UnsafeCell::new(Vec::new()),
             }
@@ -50,7 +52,7 @@ mod inner {
             let src = core::include_bytes!(core::env!("CRYPT_DB"));
             if src.len() < 65 {
                 // Invalid or no key, bail.
-                stx::abort();
+                abort();
             }
             // Copy non-key material to our backing buffer.
             unsafe {
@@ -73,10 +75,14 @@ mod inner {
                     continue;
                 }
                 if i - s > 0 {
-                    e[n] = unsafe { core::str::from_utf8_unchecked(&b[s..i]) }
+                    e[n] = unsafe { from_utf8_unchecked(&b[s..i]) }
                 }
                 (s, n) = (i + 1, n + 1);
             }
+            bugtrack!(
+                "util::crypt::Mapper.init(): Crypt loader loaded {n} entries from {} bytes.",
+                src.len()
+            )
         }
         #[inline]
         fn check(&self) {
@@ -91,13 +97,14 @@ mod inner {
         #[inline]
         fn destroy(&self) {
             unsafe {
-                *self.map.get() = [core::str::from_utf8_unchecked(&[]); 255];
+                *self.map.get() = [from_utf8_unchecked(&[]); 255];
                 ptr::drop_in_place(&mut *self.backing.get())
             }
         }
         #[inline]
         fn get(&self, index: u8) -> &'a str {
             self.check();
+            // SAFETY: Fast check, no bounds checking.
             unsafe { (*self.map.get()).get_unchecked(index as usize) }
         }
     }
@@ -117,19 +124,17 @@ mod inner {
         MAPPER.destroy();
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get_or(index: u8, _v: &str) -> &str {
         MAPPER.get(index)
     }
 }
 #[cfg(not(feature = "crypt"))]
 mod inner {
-    #[inline]
-    pub fn init() {}
-    #[inline]
+    #[inline(always)]
     pub fn unload() {}
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get_or(_index: u8, v: &str) -> &str {
         v
     }

@@ -18,10 +18,10 @@
 
 pub use self::inner::*;
 
-#[cfg(windows)]
+#[cfg(all(target_family = "windows", not(feature = "std")))]
 #[path = "device/winapi/std/thread.rs"]
 mod inner;
-#[cfg(unix)]
+#[cfg(any(not(target_family = "windows"), feature = "std"))]
 mod inner {
     extern crate std;
     pub use std::thread::*;

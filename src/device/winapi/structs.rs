@@ -15,25 +15,31 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 mod data;
+mod debug;
 mod handles;
+mod list;
 mod memory;
 mod network;
 mod process;
 mod registry;
+mod screen;
 mod security;
 mod sessions;
 mod string;
 mod system;
 
 pub use self::data::*;
+pub use self::debug::*;
 pub use self::handles::*;
+pub use self::list::*;
 pub use self::memory::*;
 pub use self::network::*;
 pub use self::process::*;
 pub use self::registry::*;
+pub use self::screen::*;
 pub use self::security::*;
 pub use self::sessions::*;
 pub use self::string::*;

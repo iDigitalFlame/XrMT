@@ -15,14 +15,13 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::fmt::{self, Debug, Formatter};
-use core::sync::atomic::{self, Ordering};
+use core::sync::atomic::{fence, Ordering};
 
+use crate::prelude::*;
 use crate::sync::{Event, Mutex};
-use crate::util::stx;
-use crate::util::stx::prelude::*;
 
 pub struct Barrier {
     lock:  Mutex<(usize, usize)>,
@@ -35,7 +34,7 @@ impl Barrier {
     #[inline]
     pub fn new(n: usize) -> Barrier {
         Barrier {
-            lock:  Mutex::new((0, 0)),
+            lock:  Mutex::new((0usize, 0usize)),
             inner: Event::new(),
             limit: n,
         }
@@ -44,7 +43,7 @@ impl Barrier {
     pub fn wait(&self) -> BarrierWaitResult {
         let s = {
             // NOTE(dij): We panic here as this shouldn't happen, hopefully.
-            let mut i = stx::unwrap(self.lock.lock());
+            let mut i = unwrap_unlikely(self.lock.lock());
             i.0 += 1;
             if i.0 < self.limit {
                 false
@@ -54,10 +53,10 @@ impl Barrier {
                 true
             }
         };
-        atomic::fence(Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         if s {
             // NOTE(dij): We panic here as this shouldn't happen, hopefully.
-            stx::unwrap(self.inner.signal());
+            unwrap_unlikely(self.inner.signal());
         } else {
             self.inner.wait()
         }

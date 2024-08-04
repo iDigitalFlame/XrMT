@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use crate::device::winapi::loader::kernel32::{K32EnumDeviceDrivers, K32GetDeviceDriverFileName, K32GetModuleInformation};

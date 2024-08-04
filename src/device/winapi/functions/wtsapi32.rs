@@ -15,15 +15,17 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
-use core::{cmp, ptr, slice};
+use core::slice::from_raw_parts;
+use core::{cmp, ptr};
 
+use crate::data::str::MaybeString;
 use crate::device::winapi::functions::structs::{WTSProcess, WTSSession};
 use crate::device::winapi::loader::wtsapi32;
-use crate::device::winapi::{self, MaybeString, Session, SessionHandle, SessionProcess, WChar, WChars, Win32Result};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{self, Session, SessionHandle, SessionProcess, WChar, WChars, Win32Result};
+use crate::prelude::*;
 
 #[inline]
 pub fn wts_sessions_by_name(server: impl MaybeString) -> Win32Result<Vec<Session>> {
@@ -41,7 +43,7 @@ pub fn WTSCloseServer(h: &SessionHandle) {
 }
 pub fn WTSGetSessions(h: &SessionHandle) -> Win32Result<Vec<Session>> {
     winapi::init_wtsapi32();
-    let (mut c, mut b) = (0u32, 0);
+    let (mut c, mut b) = (0u32, 0usize);
     let r = unsafe {
         winapi::syscall!(
             *wtsapi32::WTSEnumerateSessions,
@@ -59,7 +61,7 @@ pub fn WTSGetSessions(h: &SessionHandle) -> Win32Result<Vec<Session>> {
     let mut o = Vec::with_capacity(c as usize);
     if c > 0 {
         let v = winapi::is_min_windows_7();
-        for i in unsafe { slice::from_raw_parts(b as *const WTSSession, c as usize) } {
+        for i in unsafe { from_raw_parts(b as *const WTSSession, c as usize) } {
             o.push(i.into_inner(h, v)?);
         }
     }
@@ -117,7 +119,7 @@ pub fn WTSDisconnectSession(h: &SessionHandle, session_id: u32, wait: bool) -> W
 }
 pub fn WTSEnumerateProcesses(h: &SessionHandle, session_id: i32) -> Win32Result<Vec<SessionProcess>> {
     winapi::init_wtsapi32();
-    let (mut c, mut b) = (0u32, 0);
+    let (mut c, mut b) = (0u32, 0usize);
     let r = unsafe {
         winapi::syscall!(
             *wtsapi32::WTSEnumerateProcesses,
@@ -134,7 +136,7 @@ pub fn WTSEnumerateProcesses(h: &SessionHandle, session_id: i32) -> Win32Result<
     }
     let mut o = Vec::with_capacity(c as usize);
     if c > 0 {
-        for i in unsafe { slice::from_raw_parts(b as *const WTSProcess, c as usize) } {
+        for i in unsafe { from_raw_parts(b as *const WTSProcess, c as usize) } {
             if session_id < 0 || session_id as u32 == i.session_id {
                 o.push(i.into_inner())
             }
@@ -155,9 +157,9 @@ pub fn WTSSendMessage(h: &SessionHandle, session_id: u32, title: impl MaybeStrin
             h.0,
             session_id,
             if t.is_empty() { ptr::null() } else { t.as_ptr() },
-            cmp::min(t.len_as_bytes(), u32::MAX as usize) as u32,
+            cmp::min(t.len_as_bytes(), 0xFFFFFFFF) as u32,
             if d.is_empty() { ptr::null() } else { d.as_ptr() },
-            cmp::min(d.len_as_bytes(), u32::MAX as usize) as u32,
+            cmp::min(d.len_as_bytes(), 0xFFFFFFFF) as u32,
             flags,
             secs,
             &mut o,

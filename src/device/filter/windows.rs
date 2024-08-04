@@ -15,74 +15,104 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use super::{Filter, FilterError, FilterFunc};
-use crate::device::rand::Rand;
-use crate::device::winapi::{self, OwnedHandle, ProcessEntry, Win32Error};
-use crate::util::stx::prelude::*;
+use core::alloc::Allocator;
 
-impl Filter {
+use crate::data::rand::Rand;
+use crate::data::str::Fiber;
+use crate::device::winapi::{self, OwnedHandle, ProcessItem, Win32Error};
+use crate::prelude::*;
+use crate::process::filter::{Filter, FilterError, FilterFunc};
+use crate::process::{FilterHandle, FilterResult};
+
+impl<A: Allocator> Filter<A> {
     #[inline]
-    pub fn select(&self) -> Result<u32, FilterError> {
+    pub fn select(&self) -> FilterResult<u32> {
         self.select_func(None)
     }
     #[inline]
-    pub fn token(&self, access: u32) -> Result<OwnedHandle, FilterError> {
+    pub fn token(&self, access: u32) -> FilterResult<FilterHandle> {
         self.token_func(access, None)
     }
     #[inline]
-    pub fn thread(&self, access: u32) -> Result<OwnedHandle, FilterError> {
+    pub fn thread(&self, access: u32) -> FilterResult<FilterHandle> {
         self.thread_func(access, None)
     }
     #[inline]
-    pub fn handle(&self, access: u32) -> Result<OwnedHandle, FilterError> {
+    pub fn handle(&self, access: u32) -> FilterResult<FilterHandle> {
         self.handle_func(access, None)
     }
     #[inline]
-    pub fn select_func(&self, func: FilterFunc) -> Result<u32, FilterError> {
+    pub fn select_func(&self, func: FilterFunc) -> FilterResult<u32> {
+        if self.is_empty() {
+            return Err(FilterError::NoProcessFound);
+        }
         if self.pid > 4 && func.is_none() {
             return Ok(self.pid);
         }
         // 0x400 - PROCESS_QUERY_LIMITED_INFORMATION
-        Ok(self.open(0x1000, false, func)?.process_id)
+        Ok(self.open(0x1000, false, func, false)?.0.pid)
     }
     #[inline]
-    pub fn token_func(&self, access: u32, func: FilterFunc) -> Result<OwnedHandle, FilterError> {
-        // 0x400 - PROCESS_QUERY_INFORMATION
-        Ok(winapi::OpenProcessToken(self.handle_func(0x400, func)?, access).map_err(FilterError::from)?)
+    pub fn token_func(&self, access: u32, func: FilterFunc) -> FilterResult<FilterHandle> {
+        if self.is_empty() {
+            Err(FilterError::NoProcessFound)
+        } else {
+            // 0x400 - PROCESS_QUERY_INFORMATION
+            winapi::OpenProcessToken(self.handle_func(0x400, func)?, access).map_err(FilterError::from)
+        }
     }
-    pub fn thread_func(&self, access: u32, func: FilterFunc) -> Result<OwnedHandle, FilterError> {
+    pub fn thread_func(&self, access: u32, func: FilterFunc) -> FilterResult<FilterHandle> {
         let p = self.select_func(func)?;
-        let _ = winapi::acquire_privilege(winapi::SE_DEBUG_PRIVILEGE); // IGNORE ERROR
-        for e in winapi::list_threads(p).map_err(FilterError::from)? {
+        winapi::acquire_debug();
+        let r = winapi::list_threads(p).or_else(|e| {
+            winapi::release_debug();
+            Err(e)
+        })?;
+        for e in r {
             if let Ok(h) = e.handle(access) {
+                winapi::release_debug();
                 return Ok(h);
             }
         }
+        winapi::release_debug();
         Err(FilterError::NoProcessFound)
     }
-    pub fn handle_func(&self, access: u32, func: FilterFunc) -> Result<OwnedHandle, FilterError> {
-        if self.pid <= 4 {
-            return self.open(access, false, func)?.handle(access).map_err(FilterError::from);
+    pub fn handle_func(&self, access: u32, func: FilterFunc) -> FilterResult<FilterHandle> {
+        if self.is_empty() {
+            return Err(FilterError::NoProcessFound);
         }
-        let _ = winapi::acquire_privilege(winapi::SE_DEBUG_PRIVILEGE); // IGNORE ERROR
-        let h = winapi::OpenProcess(access, false, self.pid).map_err(FilterError::from)?;
-        if let Some(f) = func {
-            let n = winapi::GetProcessFileName(&h).map_err(FilterError::from)?;
+        if self.pid <= 4 {
+            return Ok(self.open(access, false, func, true)?.1);
+        }
+        winapi::acquire_debug();
+        let h = winapi::OpenProcess(access, false, self.pid).or_else(|e| {
+            winapi::release_debug();
+            Err(e)
+        })?;
+        let r = if let Some(f) = func {
+            let n = winapi::GetProcessFileName(&h)?;
             // 0x20008 - TOKEN_READ | TOKEN_QUERY
             let r = f(
                 self.pid,
-                winapi::is_token_elevated(winapi::OpenProcessToken(&h, 0x20008).map_err(FilterError::from)?),
+                winapi::is_token_elevated(winapi::OpenProcessToken(&h, 0x20008)?),
                 &n,
                 h.0,
             );
-            return if r { Ok(h) } else { Err(FilterError::NoProcessFound) };
-        }
-        Ok(h)
+            if r {
+                Ok(h)
+            } else {
+                Err(FilterError::NoProcessFound)
+            }
+        } else {
+            Ok(h)
+        };
+        winapi::release_debug();
+        r
     }
 
-    fn open(&self, access: u32, retry: bool, func: FilterFunc) -> Result<ProcessEntry, FilterError> {
+    fn open(&self, access: u32, retry: bool, func: FilterFunc, handle: bool) -> FilterResult<(ProcessItem, OwnedHandle)> {
         let p = winapi::GetCurrentProcessID();
         let (s, v) = (
             self.session > Filter::EMPTY,
@@ -90,57 +120,82 @@ impl Filter {
                                                               * The Go version also has it? Is it a cross-platform bug? */
         );
         let mut r = Rand::new();
-        let mut z: Vec<ProcessEntry> = Vec::with_capacity(64);
-        let _ = winapi::acquire_privilege(winapi::SE_DEBUG_PRIVILEGE); // IGNORE ERROR
-        for e in winapi::list_processes().map_err(FilterError::from)? {
-            if e.process_id == p || e.process_id < 5 || e.name.is_empty() || (self.pid > 0 && self.pid != e.process_id) {
+        let mut z: Vec<(ProcessItem, OwnedHandle)> = Vec::with_capacity(64);
+        winapi::acquire_debug();
+        let w = winapi::list_processes().map_err(FilterError::from).or_else(|e| {
+            winapi::release_debug();
+            Err(e)
+        })?;
+        for e in w {
+            if e.pid == p || e.pid < 5 || e.name.is_empty() || (self.pid > 0 && self.pid != e.pid) {
                 continue;
             }
             if (!self.exclude.is_empty() && in_list(&e.name, &self.exclude)) || (!self.include.is_empty() && !in_list(&e.name, &self.include)) {
                 continue;
             }
             if (func.is_none() && !s && !v) || retry {
-                if e.handle(access).is_ok() {
-                    z.push(e)
-                }
+                let x = ok_or_continue!(e.handle(access));
+                bugtrack!(
+                    "process::filter::Filter::open(): Added process e.name={}, e.pid={} for eval.",
+                    e.name,
+                    e.pid
+                );
+                z.push((e, x));
                 continue;
             }
-            if let Ok((h, k, i)) = e.info_ex(access, v, s, func.is_some()) {
+            if let Ok((h, k, i)) = e.info_ex(access, v, s, func.is_some() || handle) {
                 if v && ((k && self.elevated == Filter::FALSE) || (!k && self.elevated == Filter::TRUE)) {
                     continue;
                 }
                 if s && ((i > 0 && self.session == Filter::FALSE) || (i == 0 && self.session == Filter::TRUE)) {
                     continue;
                 }
-                if func.map_or(true, |f| f(e.process_id, k, &e.name, h.map_or(0, |v| v.0))) {
-                    z.push(e);
+                if func.map_or(true, |f| {
+                    f(e.pid, k, &e.name, h.as_ref().map_or(0, |v| v.0))
+                }) {
+                    bugtrack!(
+                        "process::filter::Filter::open(): Added process e.name={}, e.pid={} for eval.",
+                        e.name,
+                        e.pid
+                    );
+                    z.push((e, h.unwrap_or_default()));
                 }
             }
         }
+        winapi::release_debug();
         if z.is_empty() {
             return if !retry && func.is_none() && self.fallback {
-                self.open(access, true, func)
+                bugtrack!("process::filter::Filter::open(): First run failed, starting fallback run!");
+
+                self.open(access, true, func, handle)
             } else {
                 Err(FilterError::NoProcessFound)
             };
         }
-        if z.len() == 1 {
-            Ok(z[0].clone())
+        let r = if z.len() == 1 {
+            z.remove(0)
         } else {
-            Ok(z[r.rand_u32n(z.len() as u32) as usize].clone())
-        }
+            z.remove(r.rand_u32n(z.len() as u32) as usize)
+        };
+        bugtrack!(
+            "process::filter::Filter::open(): Returning process e.name={}, e.pid={}, handle={:?}.",
+            r.0.name,
+            r.0.pid,
+            r.1
+        );
+        Ok(r)
     }
 }
 
 impl From<Win32Error> for FilterError {
     #[inline]
     fn from(v: Win32Error) -> FilterError {
-        FilterError::FindError(v.to_string())
+        FilterError::OsError(v.code() as i32)
     }
 }
 
 #[inline]
-fn in_list(m: &str, c: &[String]) -> bool {
+fn in_list<A: Allocator>(m: &str, c: &[Fiber<A>]) -> bool {
     for i in c {
         if m.eq_ignore_ascii_case(&i) {
             return true;

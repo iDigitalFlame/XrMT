@@ -16,23 +16,29 @@
 
 #![no_implicit_prelude]
 
+use alloc::alloc::Global;
 use core::time::Duration;
 
 use crate::c2::{write_packet, Transform, Wrapper};
 use crate::com::{Flag, Packet};
-use crate::device;
+use crate::device::local_id;
 use crate::net::TcpStream;
-use crate::util::stx::io;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
+use crate::{ignore_error, io};
 
 pub fn shoot(host: impl AsRef<str>, data: Packet) -> io::Result<()> {
     // TODO(dij): Profiles support.
     let mut c = TcpStream::connect(host.as_ref())?;
     let mut n = data;
     if n.device.is_empty() {
-        n.device = device::system_id();
+        n.device = local_id();
     }
     n.flags |= Flag::ONESHOT;
-    let _ = c.set_write_timeout(Some(Duration::from_secs(10))); // IGNORE ERROR
-    write_packet(&mut c, &mut Wrapper::None, &mut Transform::None, n)
+    ignore_error!(c.set_write_timeout(Some(Duration::from_secs(10))));
+    write_packet(
+        &mut c,
+        &mut Wrapper::None::<Global>,
+        &mut Transform::None,
+        n,
+    )
 }

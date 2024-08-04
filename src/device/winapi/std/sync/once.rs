@@ -15,13 +15,12 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
+use crate::prelude::*;
 use crate::sync::{Lazy, Mutant};
-use crate::util::stx;
-use crate::util::stx::prelude::*;
 
 pub struct Once {
     lazy: Lazy,
@@ -50,10 +49,10 @@ impl Once {
         }
         // NOTE(dij): We panic here as this shouldn't happen. This is a panic as
         //            the lock shouldn't fail.
-        stx::unwrap(self.lock.lock());
+        unwrap_unlikely(self.lock.lock());
         if self.lazy.load(f) {
             // NOTE(dij): We panic here as this shouldn't happen, hopefully.
-            stx::unwrap(self.lock.unlock());
+            unwrap_unlikely(self.lock.unlock());
             // Close the Mutant Handle, we no longer need it.
             unsafe { self.lock.close() };
         }
@@ -65,10 +64,10 @@ impl Once {
         }
         // NOTE(dij): We panic here as this shouldn't happen. This is a panic as
         //            the lock shouldn't fail.
-        stx::unwrap(self.lock.lock());
+        unwrap_unlikely(self.lock.lock());
         if self.lazy.load(|| f(&OnceState)) {
             // NOTE(dij): We panic here as this shouldn't happen, hopefully.
-            stx::unwrap(self.lock.unlock());
+            unwrap_unlikely(self.lock.unlock());
             // Close the Mutant Handle, we no longer need it.
             unsafe { self.lock.close() };
         }

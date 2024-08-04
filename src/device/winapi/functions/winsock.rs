@@ -15,19 +15,20 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case)]
 
+use core::mem::{size_of, zeroed};
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use core::{cmp, mem, ptr};
+use core::{cmp, ptr};
 
 use crate::device::winapi::functions::{FDSet, SockAddr, SockBuffer, SockInfo, SockPointer};
 use crate::device::winapi::loader::winsock;
 use crate::device::winapi::{self, AddressInfo, Chars, Handle, OwnedSocket, Win32Error, Win32Result};
-use crate::util::stx;
-use crate::util::stx::prelude::*;
+use crate::ignore_error;
+use crate::prelude::*;
 
 static WSA_INIT: AtomicBool = AtomicBool::new(false);
 
@@ -135,40 +136,6 @@ pub fn WSAShutdownSock(sock: &OwnedSocket, how: u32) -> Win32Result<()> {
         Ok(())
     }
 }
-pub fn WSAWaitSock(sock: &OwnedSocket, dur: Duration) -> Win32Result<()> {
-    winapi::init_winsock();
-    let e = unsafe {
-        let mut f = sock.0.into();
-        let mut t = [
-            cmp::min(dur.as_secs(), u32::MAX as u64) as u32,
-            (dur.subsec_nanos() / 1000),
-        ];
-        if t[0] == 0 && t[1] == 0 {
-            t[1] = 1;
-        }
-        wsa_init();
-        winapi::syscall!(
-            *winsock::Select,
-            extern "stdcall" fn(u32, *mut FDSet, *mut FDSet, *mut FDSet, *const u32) -> i32,
-            1,
-            ptr::null_mut(),
-            &mut f,
-            &mut f,
-            t.as_ptr()
-        ) == -1
-    };
-    if e {
-        return Err(winapi::last_error());
-    }
-    // 0xFFFF - SOL_SOCKET
-    // 0x1007 - SO_ERROR
-    let r: u32 = WSAGetSockOption(sock, 0xFFFF, 0x1007)?;
-    if r > 0 {
-        Err(Win32Error::Code(r))
-    } else {
-        Ok(())
-    }
-}
 pub fn WSADuplicateSocket(sock: &OwnedSocket) -> Win32Result<OwnedSocket> {
     winapi::init_winsock();
     let mut i = SockInfo::default();
@@ -252,7 +219,7 @@ pub fn WSASend(sock: &OwnedSocket, flags: u32, buf: &[u8]) -> Win32Result<usize>
     let mut n = 0u32;
     let e = unsafe {
         let b = SockBuffer {
-            len: cmp::min(buf.len(), u32::MAX as usize) as u32,
+            len: cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             buf: SockPointer { write: buf.as_ptr() },
         };
         wsa_init();
@@ -272,16 +239,54 @@ pub fn WSASend(sock: &OwnedSocket, flags: u32, buf: &[u8]) -> Win32Result<usize>
     match c {
         _ if e => Ok(n as usize),
         /* WSAESHUTDOWN */ 0x274A => Ok(0),
-        _ => Err(Win32Error::Code(c)),
+        _ => Err(Win32Error::from_code(c)),
+    }
+}
+pub fn WSAWaitSock(sock: &OwnedSocket, dur: Option<Duration>) -> Win32Result<()> {
+    winapi::init_winsock();
+    let e = unsafe {
+        let mut f = sock.0.into();
+        let d = dur.unwrap_or_default();
+        let mut t = [
+            cmp::min(d.as_secs(), 0xFFFFFFFF) as u32,
+            cmp::min(
+                ((d.as_micros() as u64).checked_sub(d.as_secs() * 1000000).unwrap_or(0)) as u32,
+                0xFFFFFFFF,
+            ),
+        ];
+        if t[0] == 0 && t[1] == 0 {
+            t[1] = 1;
+        }
+        wsa_init();
+        winapi::syscall!(
+            *winsock::Select,
+            extern "stdcall" fn(u32, *mut FDSet, *mut FDSet, *mut FDSet, *const u32) -> i32,
+            1,
+            &mut f,
+            &mut f,
+            &mut f,
+            if dur.is_none() { ptr::null() } else { t.as_ptr() }
+        ) == -1
+    };
+    if e {
+        return Err(winapi::last_error());
+    }
+    // 0xFFFF - SOL_SOCKET
+    // 0x1007 - SO_ERROR
+    let r: u32 = WSAGetSockOption(sock, 0xFFFF, 0x1007)?;
+    if r > 0 {
+        Err(Win32Error::from_code(r))
+    } else {
+        Ok(())
     }
 }
 pub fn WSARecv(sock: &OwnedSocket, flags: u32, buf: &mut [u8]) -> Win32Result<usize> {
     winapi::init_winsock();
-    let mut n = 0;
+    let mut n = 0u32;
     let e = unsafe {
         let mut f = flags;
         let mut b = SockBuffer {
-            len: cmp::min(buf.len(), u32::MAX as usize) as u32,
+            len: cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             buf: SockPointer { read: buf.as_mut_ptr() },
         };
         wsa_init();
@@ -301,14 +306,14 @@ pub fn WSARecv(sock: &OwnedSocket, flags: u32, buf: &mut [u8]) -> Win32Result<us
     match c {
         _ if e => Ok(n as usize),
         /* WSAESHUTDOWN */ 0x274A => Ok(0),
-        _ => Err(Win32Error::Code(c)),
+        _ => Err(Win32Error::from_code(c)),
     }
 }
 pub fn WSAGetSockOption<T>(sock: &OwnedSocket, level: u32, opt: u32) -> Win32Result<T> {
     winapi::init_winsock();
-    let mut v: T = unsafe { mem::zeroed() };
+    let mut v: T = unsafe { zeroed() };
     let e = unsafe {
-        let mut n = cmp::min(mem::size_of::<T>(), u32::MAX as usize) as u32;
+        let mut n = cmp::min(size_of::<T>(), 0xFFFFFFFF) as u32;
         wsa_init();
         winapi::syscall!(
             *winsock::GetSockOpt,
@@ -330,7 +335,7 @@ pub fn WSAIoctl<T>(sock: &OwnedSocket, code: u32, input: T, output: *mut T) -> W
     winapi::init_winsock();
     let mut n = 0u32;
     let e = unsafe {
-        let x = cmp::min(mem::size_of::<T>(), u32::MAX as usize) as u32;
+        let x = cmp::min(size_of::<T>(), 0xFFFFFFFF) as u32;
         wsa_init();
         winapi::syscall!(
             *winsock::WSAIoctl,
@@ -363,7 +368,7 @@ pub fn WSASetSockOption<T>(sock: &OwnedSocket, level: u32, opt: u32, value: T) -
             level,
             opt,
             &value,
-            cmp::min(mem::size_of::<T>(), u32::MAX as usize) as u32
+            cmp::min(size_of::<T>(), 0xFFFFFFFF) as u32
         ) != 0
     };
     if e {
@@ -379,7 +384,7 @@ pub fn WSARecvFrom(sock: &OwnedSocket, flags: u32, buf: &mut [u8]) -> Win32Resul
     let e = unsafe {
         let mut f = flags;
         let mut b = SockBuffer {
-            len: cmp::min(buf.len(), u32::MAX as usize) as u32,
+            len: cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             buf: SockPointer { read: buf.as_mut_ptr() },
         };
         let mut s = 0x1Cu32;
@@ -402,7 +407,7 @@ pub fn WSARecvFrom(sock: &OwnedSocket, flags: u32, buf: &mut [u8]) -> Win32Resul
     match c {
         _ if e => Ok((n as usize, a.try_into()?)),
         /* WSAESHUTDOWN */ 0x274A => Ok((0, a.try_into()?)),
-        _ => Err(Win32Error::Code(c)),
+        _ => Err(Win32Error::from_code(c)),
     }
 }
 pub fn WSASendTo(sock: &OwnedSocket, address: &SocketAddr, flags: u32, buf: &[u8]) -> Win32Result<usize> {
@@ -410,7 +415,7 @@ pub fn WSASendTo(sock: &OwnedSocket, address: &SocketAddr, flags: u32, buf: &[u8
     let mut n = 0u32;
     let e = unsafe {
         let b = SockBuffer {
-            len: cmp::min(buf.len(), u32::MAX as usize) as u32,
+            len: cmp::min(buf.len(), 0xFFFFFFFF) as u32,
             buf: SockPointer { write: buf.as_ptr() },
         };
         let (a, s) = SockAddr::convert(address);
@@ -433,7 +438,7 @@ pub fn WSASendTo(sock: &OwnedSocket, address: &SocketAddr, flags: u32, buf: &[u8
     match c {
         _ if e => Ok(n as usize),
         /* WSAESHUTDOWN */ 0x274A => Ok(0),
-        _ => Err(Win32Error::Code(c)),
+        _ => Err(Win32Error::from_code(c)),
     }
 }
 pub fn WSAGetAddrInfo(host: impl AsRef<str>, socktype: u32, family: u32, flags: u32) -> Win32Result<*const AddressInfo> {
@@ -482,7 +487,7 @@ pub fn WSASocket(family: u32, socket_type: u32, protocol: u32, blocking: bool, i
         let x = Handle(h as usize);
         if !v && !inherit {
             // If we're older than Windows 8, try to remove the inheritance flag.
-            let _ = winapi::SetHandleInformation(x, false, false); // IGNORE ERROR
+            ignore_error!(winapi::SetHandleInformation(x, false, false));
         }
         Ok(OwnedSocket(x.0))
     }
@@ -495,7 +500,7 @@ fn wsa_init() {
         .is_ok()
     {
         // NOTE(dij): If this fails, we have bigger problems.
-        stx::unwrap(wsa_startup(0x202))
+        unwrap_unlikely(wsa_startup(0x202))
     }
 }
 fn wsa_startup(version: u16) -> Win32Result<()> {

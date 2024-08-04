@@ -33,37 +33,83 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 extern crate core;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
+use core::clone::Clone;
+use core::default::Default;
+use core::ptr::NonNull;
 use core::{cmp, ptr};
 
-pub use self::tracker::*;
+core::cfg_match! {
+    cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "arm64ec", target_arch = "loongarch64", target_arch = "mips64", target_arch = "mips64r6", target_arch = "s390x", target_arch = "sparc64", target_arch = "riscv64")) => {
+        const fn _align() -> usize {
+            16
+        }
+    }
+    cfg(any(target_arch = "x86", target_arch = "arm", target_arch = "csky", target_arch = "mips", target_arch = "mips32r6", target_arch = "powerpc", target_arch = "powerpc64", target_arch = "sparc", target_arch = "riscv32")) => {
+        const fn _align() -> usize {
+            8
+        }
+    }
+    _ => {
+        const fn _align() -> usize {
+            4
+        }
+    }
+}
 
-const MIN: usize = if cfg!(any(
-    target_arch = "s390x",
-    target_arch = "x86_64",
-    target_arch = "aarch64"
-)) {
-    16
-} else {
-    8
-};
+const MIN: usize = _align();
+
+pub struct HeapAllocator;
+
+impl HeapAllocator {
+    #[inline]
+    pub const fn new() -> HeapAllocator {
+        HeapAllocator {}
+    }
+}
+
+impl Clone for HeapAllocator {
+    #[inline]
+    fn clone(&self) -> HeapAllocator {
+        HeapAllocator {}
+    }
+}
+impl Default for HeapAllocator {
+    #[inline]
+    fn default() -> HeapAllocator {
+        HeapAllocator {}
+    }
+}
 
 unsafe impl GlobalAlloc for HeapAllocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         #[cfg(feature = "heap_track")]
         {
-            self.track(layout);
+            bugtrack!(
+                "(HeapAllocator).alloc(): Allocation of memory size={}, align={}.",
+                layout.size(),
+                layout.align()
+            );
         }
         alloc(layout, 0)
     }
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        #[cfg(feature = "heap_track")]
+        {
+            bugtrack!(
+                "(HeapAllocator).alloc(): Deallocation of memory size={}, align={} at address {:X}.",
+                layout.size(),
+                layout.align(),
+                ptr as usize
+            );
+        }
         inner::heap_free(
             process_heap(),
             0,
@@ -78,7 +124,6 @@ unsafe impl GlobalAlloc for HeapAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         alloc(layout, 0x8)
     }
-    #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let h = process_heap();
         if layout.align() <= MIN {
@@ -101,12 +146,32 @@ unsafe impl GlobalAlloc for HeapAllocator {
 #[inline(never)]
 unsafe fn process_heap() -> usize {
     let mut h;
-    // TODO(dij): Add ARM/ARM64 code here.
+    // NOTE(dij): I'm not 100% sure if this works correctly. For the most
+    //            part Windows or ARM has a very limited set of machines
+    //            _currently_ supported for ARM and is focusing more on
+    //            AARCH64.
+    //            Also, why is ARM opcode so different than AARCH64?
+    #[cfg(target_arch = "arm")]
+    asm!(
+        "push {{rll, lr}}
+         mov    rll, sp
+         mrc    p15, 0x0, r3, cr13, cr0, 0x2
+         ldr     r0, [r3, #0x30]
+         ldr     {}, [r0, #0x18]", out(reg) h
+    );
+    // NOTE(dij): This is some guesstimating on my part based on the other
+    //            ASM samples I found. *shrug*
+    #[cfg(target_arch = "aarch64")]
+    asm!(
+        "mov x8, x18
+         ldr x8, [x8, #0x60]
+         ldr {}, [x8, #0x30]", out(reg) h
+    );
     #[cfg(target_arch = "x86")]
     asm!(
         "mov eax, FS:[0x18]
          mov eax, dword ptr [eax+0x30]
-         mov {},  dword ptr [eax+0x18]",  out(reg) h
+         mov {},  dword ptr [eax+0x18]", out(reg) h
     );
     #[cfg(target_arch = "x86_64")]
     asm!(
@@ -115,8 +180,10 @@ unsafe fn process_heap() -> usize {
     );
     h
 }
-#[inline]
 unsafe fn alloc(layout: Layout, flags: u32) -> *mut u8 {
+    if layout.size() == 0 {
+        return NonNull::slice_from_raw_parts(layout.dangling(), 0).as_ptr() as *mut u8;
+    }
     let h = process_heap();
     if layout.align() <= MIN {
         return inner::heap_alloc(h, flags, layout.size()) as *mut u8;
@@ -131,80 +198,8 @@ unsafe fn alloc(layout: Layout, flags: u32) -> *mut u8 {
     v as *mut u8
 }
 
-#[cfg(feature = "heap_track")]
-mod tracker {
-    extern crate core;
-
-    use core::alloc::Layout;
-    use core::clone::Clone;
-    use core::default::Default;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-
-    pub struct HeapAllocator(AtomicUsize);
-
-    impl HeapAllocator {
-        #[inline]
-        pub const fn new() -> HeapAllocator {
-            HeapAllocator(AtomicUsize::new(0))
-        }
-
-        #[inline]
-        pub fn total(&self) -> usize {
-            self.0.load(Ordering::Relaxed);
-        }
-
-        #[inline]
-        pub(super) fn track(&self, v: Layout) {
-            if v.align() <= super::MIN {
-                self.0.fetch_add(v.size(), Ordering::Release);
-            } else {
-                self.0.fetch_add(v.align() + v.size(), Ordering::Release);
-            }
-        }
-    }
-
-    impl Clone for HeapAllocator {
-        #[inline]
-        fn clone(&self) -> HeapAllocator {
-            HeapAllocator(AtomicUsize::new(self.0.load(Ordering::Relaxed)))
-        }
-    }
-    impl Default for HeapAllocator {
-        #[inline]
-        fn default() -> HeapAllocator {
-            HeapAllocator(AtomicUsize::new(0))
-        }
-    }
-}
-#[cfg(not(feature = "heap_track"))]
-mod tracker {
-    extern crate core;
-
-    use core::clone::Clone;
-    use core::default::Default;
-
-    pub struct HeapAllocator;
-
-    impl HeapAllocator {
-        #[inline]
-        pub const fn new() -> HeapAllocator {
-            HeapAllocator {}
-        }
-    }
-
-    impl Clone for HeapAllocator {
-        #[inline]
-        fn clone(&self) -> HeapAllocator {
-            HeapAllocator {}
-        }
-    }
-    impl Default for HeapAllocator {
-        #[inline]
-        fn default() -> HeapAllocator {
-            HeapAllocator {}
-        }
-    }
-}
+#[cfg(all(feature = "pie", feature = "heap_track"))]
+compile_error!("Cannot use 'pie' and 'heap_track' at the same time!");
 
 #[cfg(feature = "pie")]
 mod inner {
@@ -217,103 +212,17 @@ mod inner {
 
     extern crate core;
 
-    use core::arch::asm;
-    use core::cell::UnsafeCell;
-    use core::marker::Sync;
-    use core::result::Result::Ok;
+    use core::iter::Iterator;
+    use core::option::Option::{None, Some};
     use core::sync::atomic::{AtomicBool, Ordering};
-    use core::{mem, slice};
+
+    use crate::device::winapi::{self, Function, Handle, ImageDosHeader, ImageExportDir, ImageOptionalHeader32, ImageOptionalHeader64};
 
     static LOADED: AtomicBool = AtomicBool::new(false);
 
     static HEAP_FREE: Function = Function::new();
     static HEAP_ALLOC: Function = Function::new();
     static HEAP_REALLOC: Function = Function::new();
-
-    #[repr(C)]
-    struct PEB {
-        pad1: u32,
-        pad2: [usize; 2],
-        ldr:  *mut Loader,
-    }
-    #[repr(C)]
-    struct Loader {
-        pad1:        [u8; 8],
-        pad2:        [usize; 3],
-        module_list: LoaderEntry,
-    }
-    #[repr(C)]
-    struct LoaderEntry {
-        pad1:        usize,
-        f_link:      *mut LoaderEntry,
-        b_link:      *mut LoaderEntry,
-        links:       usize,
-        dll_base:    usize,
-        entry_point: usize,
-        image_size:  usize,
-        full_name:   LoaderString,
-        base_name:   LoaderString,
-        flags:       usize,
-    }
-    #[repr(C)]
-    struct LoaderString {
-        length:     u16,
-        max_length: u16,
-        buffer:     *const u16,
-    }
-    #[repr(C)]
-    struct ImageDosHeader {
-        magic: u16,
-        pad1:  [u8; 56],
-        pos:   u32,
-    }
-    #[repr(C)]
-    struct ImageExportDir {
-        pad1:                     [u32; 3],
-        name:                     u32,
-        base:                     u32,
-        number_of_functions:      u32,
-        number_of_names:          u32,
-        address_of_functions:     u32,
-        address_of_names:         u32,
-        address_of_name_ordinals: u32,
-    }
-    #[repr(C)]
-    struct ImageDataDirectory {
-        address: u32,
-        size:    u32,
-    }
-    #[repr(C)]
-    struct ImageOptionalHeader32 {
-        pad1:                [u8; 92],
-        number_of_rva_sizes: u32,
-        directory:           [ImageDataDirectory; 16],
-    }
-    #[repr(C)]
-    struct ImageOptionalHeader64 {
-        pad1:                [u8; 108],
-        number_of_rva_sizes: u32,
-        directory:           [ImageDataDirectory; 16],
-    }
-    struct Function(UnsafeCell<usize>);
-
-    unsafe impl Sync for Function {}
-
-    impl Function {
-        #[inline]
-        const fn new() -> Function {
-            Function(UnsafeCell::new(0))
-        }
-
-        #[inline]
-        fn set(&self, a: usize) {
-            unsafe { *self.0.get() = a }
-        }
-        #[inline]
-        fn addr(&self) -> *const () {
-            (unsafe { *self.0.get() }) as *const ()
-        }
-    }
 
     #[inline]
     pub(super) unsafe fn heap_free(heap: usize, flags: u32, addr: usize) -> u32 {
@@ -323,7 +232,13 @@ mod inner {
         {
             init() // Init before running.
         }
-        mem::transmute::<*const (), extern "stdcall" fn(usize, u32, usize) -> u32>(HEAP_FREE.addr())(heap, flags, addr)
+        winapi::syscall!(
+            *HEAP_FREE,
+            extern "stdcall" fn(usize, u32, usize) -> u32,
+            heap,
+            flags,
+            addr
+        )
     }
     #[inline]
     pub(super) unsafe fn heap_alloc(heap: usize, flags: u32, size: usize) -> usize {
@@ -333,7 +248,13 @@ mod inner {
         {
             init() // Init before running.
         }
-        mem::transmute::<*const (), extern "stdcall" fn(usize, u32, usize) -> usize>(HEAP_ALLOC.addr())(heap, flags, size)
+        winapi::syscall!(
+            *HEAP_ALLOC,
+            extern "stdcall" fn(usize, u32, usize) -> usize,
+            heap,
+            flags,
+            size
+        )
     }
     #[inline]
     pub(super) unsafe fn heap_realloc(heap: usize, flags: u32, addr: usize, new_size: usize) -> usize {
@@ -343,47 +264,48 @@ mod inner {
         {
             init() // Init before running.
         }
-        mem::transmute::<*const (), extern "stdcall" fn(usize, u32, usize, usize) -> usize>(HEAP_REALLOC.addr())(heap, flags, addr, new_size)
+        winapi::syscall!(
+            *HEAP_REALLOC,
+            extern "stdcall" fn(usize, u32, usize, usize) -> usize,
+            heap,
+            flags,
+            addr,
+            new_size
+        )
     }
 
     #[inline]
     unsafe fn init() {
-        // Let's inspect the PEB for ntdll, since we know it's there.
-        let mut next = (*(*get_peb()).ldr).module_list.f_link;
-        loop {
-            // ntdll.dll
-            if hash_str(&(*next).base_name) == 0xA9ACADD3 {
-                // Load ntdll using our DLL loader.
-                load((*next).dll_base);
-                break;
-            }
-            if (*next).f_link.is_null() || (*(*next).f_link).dll_base == 0 {
-                break;
-            }
-            next = (*next).f_link;
+        let n = winapi::GetCurrentProcessPEB()
+            .load_list()
+            .iter()
+            .find(|i| i.base_name.hash() == 0xA9ACADD3);
+        match n {
+            None => core::unreachable!(),
+            Some(d) => load(d.dll_base),
         }
     }
-    unsafe fn load(h: usize) {
+    unsafe fn load(h: Handle) {
         // There's not really any error checking here as if something fails, we're
         // fucked anyway (since this is the allocator), so we'll just let rust
         // try to load a nil entry and C05. *shrug*
-        let p = (*(h as *const ImageDosHeader)).pos as usize + 0x18;
+        let p = (&*(h.0 as *const ImageDosHeader)).pos as usize + 0x18;
         let i = match *((h + p) as *const u16) {
             0x20B => &(&*((h + p) as *const ImageOptionalHeader64)).directory[0],
             _ => &(&*((h + p) as *const ImageOptionalHeader32)).directory[0],
         };
-        let e = (h + i.address as usize) as *const ImageExportDir;
+        let e = &*((h + i.address as usize) as *const ImageExportDir);
         let (v, f, o) = (
-            h + (*e).address_of_names as usize,
-            h + (*e).address_of_functions as usize,
-            h + (*e).address_of_name_ordinals as usize,
+            h + e.address_of_names as usize,
+            h + e.address_of_functions as usize,
+            h + e.address_of_name_ordinals as usize,
         );
         let mut c = 0;
-        for x in 0..(*e).number_of_names {
+        for x in 0..e.number_of_names {
             // We don't need to worry about forwarded functions here, as ntdll
             // shouldn't have any.
             let a = h + *((f + ((*((o + (x * 2) as usize) as *const u16)) as usize * 4) as usize) as *const u32) as usize;
-            match hash(h + *((v + (x * 4) as usize) as *const u32) as usize) {
+            match Function::hash(h + *((v + (x * 4) as usize) as *const u32) as usize) {
                 /* RtlFreeHeap */ 0xBC880A2D => {
                     HEAP_FREE.set(a);
                     c += 1;
@@ -404,58 +326,19 @@ mod inner {
             }
         }
     }
-    #[inline]
-    unsafe fn hash(a: usize) -> u32 {
-        let b = slice::from_raw_parts(a as *const u8, 256);
-        let mut h: u32 = 0x811C9DC5;
-        for i in 0..256 {
-            if b[i] == 0 {
-                break;
-            }
-            h = h.wrapping_mul(0x1000193);
-            h ^= b[i] as u32;
-        }
-        h
-    }
-    #[inline(never)]
-    unsafe fn get_peb() -> *const PEB {
-        let p: *mut PEB;
-        // TODO(dij): Add ARM/ARM64 code here.
-        #[cfg(target_arch = "x86")]
-        asm!(
-            "mov eax, FS:[0x18]
-             mov {},  dword ptr [eax+0x30]", out(reg) p
-        );
-        #[cfg(target_arch = "x86_64")]
-        asm!(
-            "mov rax, qword ptr GS:[0x30]
-             mov {},  qword ptr [rax+0x60]", out(reg) p
-        );
-        p
-    }
-    #[inline]
-    unsafe fn hash_str(v: &LoaderString) -> u32 {
-        let mut h: u32 = 0x811C9DC5;
-        let s = slice::from_raw_parts(v.buffer, (v.length / 2) as usize);
-        for i in s {
-            h = h.wrapping_mul(0x1000193);
-            h ^= match *i as u8 {
-                b'A'..=b'Z' => *i + 0x20,
-                _ => *i,
-            } as u32;
-        }
-        h
-    }
 }
 #[cfg(not(feature = "pie"))]
 mod inner {
     /*
-    Here's the import entry for using ntdll.dll instead. The functions are exactly
+    Here's the import entry for using kernel32.dll instead. The functions are exactly
     the same and take the same args, so they can be drop-in replacements.
 
     We're not using these as it's super sussy to import ntdll.dll directly (usually).
     Tools like ProcessHacker also don't like it and flag the binary as being packed
     when it's not (it just passes a heuristic test).
+
+    You can uncomment the below block to use ntdll.dll instead, but it is similar
+    to the PIE version.
 
     #[link(name = "ntdll")]
     extern "stdcall" {

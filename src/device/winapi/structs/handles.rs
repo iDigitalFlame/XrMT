@@ -15,15 +15,13 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
-use core::mem;
+use core::mem::forget;
 use core::ops::{Add, Deref};
 
 use crate::device::winapi::{self, Win32Result};
-use crate::util::stx::prelude::*;
-
-pub const INVALID: Handle = Handle(0);
+use crate::prelude::*;
 
 #[repr(transparent)]
 pub struct Handle(pub usize);
@@ -35,10 +33,12 @@ pub trait AsHandle {
 }
 
 impl Handle {
+    pub const INVALID: Handle = Handle(0);
+
     #[inline]
     pub fn take(v: OwnedHandle) -> Handle {
         let h = v.0;
-        mem::forget(v); // Prevent double close
+        forget(v); // Prevent double close
         h
     }
 
@@ -101,7 +101,7 @@ impl AsHandle for Handle {
 impl Default for Handle {
     #[inline]
     fn default() -> Handle {
-        Handle(0)
+        Handle(0usize)
     }
 }
 impl PartialEq for Handle {
@@ -175,12 +175,12 @@ unsafe impl Send for OwnedHandle {}
 unsafe impl Sync for Handle {}
 unsafe impl Sync for OwnedHandle {}
 
-#[cfg(not(feature = "implant"))]
+#[cfg(not(feature = "strip"))]
 mod display {
     use core::fmt::{self, Debug, Display, Formatter, LowerHex, UpperHex};
 
-    use super::{Handle, OwnedHandle};
-    use crate::util::stx::prelude::*;
+    use crate::device::winapi::{Handle, OwnedHandle};
+    use crate::prelude::*;
 
     impl Debug for Handle {
         #[inline]

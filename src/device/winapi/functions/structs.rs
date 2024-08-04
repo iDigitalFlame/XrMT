@@ -15,14 +15,15 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
+use core::mem::size_of;
 use core::net::SocketAddr;
-use core::{mem, ptr};
+use core::ptr;
 
 use crate::device::winapi::loader::wtsapi32;
-use crate::device::winapi::{self, Session, SessionHandle, SessionProcess, UnicodeString, WCharPtr, Win32Result, SID, WIN_TIME_EPOCH};
-use crate::util::stx::prelude::*;
+use crate::device::winapi::{self, Session, SessionHandle, SessionProcess, UnicodeString, WCharPtr, Win32Result, PSID, WIN_TIME_EPOCH};
+use crate::prelude::*;
 
 #[repr(C)]
 pub struct SockAddr {
@@ -50,11 +51,25 @@ pub struct LsaAttributes {
     pad3:           [usize; 2],
 }
 #[repr(C)]
-pub struct LsaAccountDomainInfo {
+pub struct LsaAccountDomainInfo<'a> {
     pub domain: UnicodeString,
-    pub sid:    SID,
+    pub sid:    PSID<'a>,
 }
 
+#[repr(C)]
+pub(super) struct Key {
+    pub key:   u16,
+    pad1:      u16,
+    pub flags: u32,
+    pad2:      u32,
+    pad3:      usize,
+}
+#[repr(C)]
+pub(super) struct Input {
+    pub key_type: u32,
+    pub key:      Key,
+    pad:          u64,
+}
 #[repr(C)]
 pub(super) struct FDSet {
     pub count: u32,
@@ -69,13 +84,6 @@ pub(super) struct SockInfo {
     pub protocol:       u32,
     pad3:               [u32; 5],
     pad4:               [u16; 256],
-}
-#[repr(C)]
-pub(super) struct WTSProcess {
-    pub session_id: u32,
-    pid:            u32,
-    name:           WCharPtr,
-    sid:            SID,
 }
 #[repr(C)]
 pub(super) struct WTSSession {
@@ -97,9 +105,22 @@ pub(super) struct FilePipeWait {
     pub timeout_specified: u8,
 }
 #[repr(C)]
+pub(super) struct HighContrast {
+    pub size:  u32,
+    pub flags: u32,
+    pad:       *const u16,
+}
+#[repr(C)]
 pub(super) struct IoStatusBlock {
     pub status: usize,
     pub info:   usize,
+}
+#[repr(C)]
+pub(super) struct WTSProcess<'a> {
+    pub session_id: u32,
+    pid:            u32,
+    name:           WCharPtr,
+    sid:            PSID<'a>,
 }
 #[repr(C, packed)]
 pub(super) struct FileLinkInformation {
@@ -151,8 +172,8 @@ impl SockAddr {
                     family: 0x2,
                     port:   u16::from_be(a.port()),
                     addr4:  u32::from_le_bytes(a.ip().octets()),
-                    addr6:  [0; 16],
-                    scope:  0,
+                    addr6:  [0u8; 16],
+                    scope:  0u32,
                 },
                 0x10,
             ),
@@ -173,23 +194,12 @@ impl QuotaLimit {
     #[inline]
     pub fn empty() -> QuotaLimit {
         QuotaLimit {
-            time_limit:           0,
-            min_working_set:      -1,
-            max_working_set:      -1,
-            page_file_limit:      0,
-            paged_pool_limit:     0,
-            non_paged_pool_limit: 0,
-        }
-    }
-}
-impl WTSProcess {
-    #[inline]
-    pub(super) fn into_inner(&self) -> SessionProcess {
-        SessionProcess {
-            pid:        self.pid,
-            name:       self.name.to_string(),
-            user:       self.sid.user().unwrap_or_default(),
-            session_id: self.session_id,
+            time_limit:           0i64,
+            min_working_set:      -1isize,
+            max_working_set:      -1isize,
+            page_file_limit:      0isize,
+            paged_pool_limit:     0isize,
+            non_paged_pool_limit: 0isize,
         }
     }
 }
@@ -197,14 +207,14 @@ impl WTSSession {
     pub(super) fn into_inner(&self, h: &SessionHandle, win_7: bool) -> Win32Result<Session> {
         let mut x = Session {
             id:         self.session_id,
-            addr:       [0; 16],
+            addr:       [0u8; 16],
             host:       self.station.to_string(),
             user:       String::new(),
             status:     self.state as u8,
             domain:     String::new(),
             is_remote:  false,
-            login_time: 0,
-            last_input: 0,
+            login_time: 0i64,
+            last_input: 0i64,
         };
         let mut p = 0u32;
         let func = unsafe {
@@ -286,6 +296,17 @@ impl FilePipeWait {
         }
     }
 }
+impl WTSProcess<'_> {
+    #[inline]
+    pub(super) fn into_inner(&self) -> SessionProcess {
+        SessionProcess {
+            pid:        self.pid,
+            name:       self.name.to_string(),
+            user:       self.sid.user().unwrap_or_default(),
+            session_id: self.session_id,
+        }
+    }
+}
 
 impl From<usize> for FDSet {
     #[inline]
@@ -300,31 +321,89 @@ impl Default for SockInfo {
     #[inline]
     fn default() -> SockInfo {
         SockInfo {
-            pad1:           [0; 19],
-            pad2:           [0; 2],
-            pad3:           [0; 5],
-            pad4:           [0; 256],
-            protocol:       0,
-            socket_type:    0,
-            address_family: 0,
+            pad1:           [0u32; 19],
+            pad2:           [0u32; 2],
+            pad3:           [0u32; 5],
+            pad4:           [0u16; 256],
+            protocol:       0u32,
+            socket_type:    0u32,
+            address_family: 0u32,
+        }
+    }
+}
+impl Default for HighContrast {
+    #[inline]
+    fn default() -> HighContrast {
+        HighContrast {
+            pad:   ptr::null(),
+            size:  size_of::<HighContrast>() as u32,
+            flags: 0u32,
         }
     }
 }
 impl Default for IoStatusBlock {
     #[inline]
     fn default() -> IoStatusBlock {
-        IoStatusBlock { status: 0, info: 0 }
+        IoStatusBlock { status: 0usize, info: 0usize }
     }
 }
 impl Default for LsaAttributes {
     #[inline]
     fn default() -> LsaAttributes {
         LsaAttributes {
-            pad1:       0,
+            pad1:       0usize,
             pad2:       ptr::null(),
-            pad3:       [0, 0],
-            length:     mem::size_of::<LsaAttributes>() as u32,
-            attributes: 0,
+            pad3:       [0usize; 2],
+            length:     size_of::<LsaAttributes>() as u32,
+            attributes: 0u32,
+        }
+    }
+}
+
+impl Copy for Key {}
+impl Clone for Key {
+    #[inline]
+    fn clone(&self) -> Key {
+        Key {
+            key:   self.key,
+            pad1:  self.pad1,
+            pad2:  self.pad2,
+            pad3:  self.pad3,
+            flags: self.flags,
+        }
+    }
+}
+impl Default for Key {
+    #[inline]
+    fn default() -> Key {
+        Key {
+            key:   0u16,
+            pad1:  0u16,
+            pad2:  0u32,
+            pad3:  0usize,
+            flags: 0u32,
+        }
+    }
+}
+
+impl Copy for Input {}
+impl Clone for Input {
+    #[inline]
+    fn clone(&self) -> Input {
+        Input {
+            pad:      self.pad,
+            key:      self.key.clone(),
+            key_type: self.key_type,
+        }
+    }
+}
+impl Default for Input {
+    #[inline]
+    fn default() -> Input {
+        Input {
+            pad:      0u64,
+            key:      Key::default(),
+            key_type: 0u32,
         }
     }
 }

@@ -15,17 +15,21 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
+use core::alloc::Allocator;
+
+use crate::data::str::Fiber;
 use crate::device;
 use crate::device::machine::{arch, os};
 use crate::device::winapi::{self, registry};
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 use crate::util::{crypt, ToStr};
 
+#[inline]
 pub fn system() -> u8 {
     #[cfg(not(target_pointer_width = "64"))]
-    if winapi::in_wow64_process().unwrap_or_default() {
+    if winapi::in_wow64_process() {
         return (os::CURRENT as u8) << 4
             | if cfg!(target_arch = "x86") {
                 arch::Architecture::X86OnX64
@@ -43,7 +47,25 @@ pub fn elevated() -> u8 {
         0
     }) + if winapi::is_elevated() { 1 } else { 0 }
 }
-pub fn version() -> String {
+#[inline]
+pub fn system_id() -> Option<Vec<u8>> {
+    if let Ok(v) = winapi::local_system_sid() {
+        return Some(v.into_bytes());
+    }
+    Some(
+        registry::open(
+            registry::HKEY_LOCAL_MACHINE,
+            Some(crypt::get_or(0, r"Software\Microsoft\Cryptography")),
+            0x101, // 0x101 - KEY_WOW64_64KEY | KEY_QUERY_VALUE
+        )
+        .ok()?
+        .value_string(crypt::get_or(0, "MachineGuid"))
+        .ok()?
+        .0
+        .into_bytes(),
+    )
+}
+pub fn version<A: Allocator + Clone>(alloc: A) -> Fiber<A> {
     // 0x101 - KEY_WOW64_64KEY | KEY_QUERY_VALUE
     let q = registry::open(
         registry::HKEY_LOCAL_MACHINE,
@@ -52,7 +74,7 @@ pub fn version() -> String {
     )
     .ok()
     .and_then(|k| k.value_string(crypt::get_or(0, "ProductName")).ok().map(|s| s.0));
-    let mut o = String::with_capacity(16);
+    let mut o = Fiber::with_capacity_in(16, alloc);
     match q {
         Some(r) => o.push_str(&r),
         None => o.push_str(crypt::get_or(0, "Windows")),
@@ -79,29 +101,23 @@ pub fn version() -> String {
             }
             s.into_vec(v);
         }
+        // Check anything before Win7.
+        if m <= 6 || (m == 6 && n < 2) {
+            // This shouldn't fail., but lets be cautious.
+            let a = winapi::GetVersion().map_or(0, |d| d.sp_major);
+            if a > 0 {
+                v.push(b';');
+                v.push(b' ');
+                v.push(b'S');
+                v.push(b'P');
+                a.into_vec(v);
+            }
+        }
         v.push(b')')
     }
     o
 }
 #[inline]
-pub fn username() -> String {
-    device::whoami().unwrap_or_else(|_| "?".to_string())
-}
-#[inline]
-pub fn system_id() -> Option<Vec<u8>> {
-    if let Ok(v) = winapi::system_sid() {
-        return Some(v.into_bytes());
-    }
-    Some(
-        registry::open(
-            registry::HKEY_LOCAL_MACHINE,
-            Some(crypt::get_or(0, r"Software\Microsoft\Cryptography")),
-            0x101, // 0x101 - KEY_WOW64_64KEY | KEY_QUERY_VALUE
-        )
-        .ok()?
-        .value_string(crypt::get_or(0, "MachineGuid"))
-        .ok()?
-        .0
-        .into_bytes(),
-    )
+pub fn username<A: Allocator + Clone>(alloc: A) -> Fiber<A> {
+    device::whoami_in(alloc.clone()).unwrap_or_else(|_| b'?'.into_alloc(alloc))
 }

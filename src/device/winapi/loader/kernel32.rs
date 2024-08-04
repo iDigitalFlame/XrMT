@@ -15,10 +15,9 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 #![allow(non_snake_case, non_upper_case_globals)]
 
-use crate::device::winapi::loader::advapi32::{CheckTokenMembership, CreateWellKnownSid, IsWellKnownSID};
 use crate::device::winapi::loader::{Function, Loader};
 
 // Only in kernel32.dll and only needed for < Win8 to duplicate Stdin.
@@ -28,10 +27,15 @@ pub(crate) static DuplicateConsoleHandle: Function = Function::new();
 pub(crate) static CopyFileEx: Function = Function::new();
 pub(crate) static MoveFileEx: Function = Function::new();
 pub(crate) static GetTempPath: Function = Function::new();
+// TODO(dij) ^
 
 pub(crate) static DebugBreak: Function = Function::new();
 pub(crate) static WriteConsoleA: Function = Function::new();
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) static OutputDebugStringA: Function = Function::new();
+
+pub(crate) static GetVersionExW: Function = Function::new();
 
 pub(crate) static LocalFree: Function = Function::new();
 pub(crate) static FormatMessage: Function = Function::new();
@@ -76,7 +80,11 @@ pub(super) static KERNEL32: Loader = Loader::new(|kernel32| {
 
     kernel32.proc(&DebugBreak, 0x7F7E4A57);
     kernel32.proc(&WriteConsoleA, 0x45550ADA);
+
+    #[cfg(target_arch = "x86_64")]
     kernel32.proc(&OutputDebugStringA, 0x58448029);
+
+    kernel32.proc(&GetVersionExW, 0xADC522A9);
 
     kernel32.proc(&LocalFree, 0x3A5DD394);
     kernel32.proc(&FormatMessage, 0x8233A148);
@@ -102,7 +110,11 @@ pub(super) static KERNELBASE: Loader = Loader::new(|kernelbase| {
 
     kernelbase.proc(&DebugBreak, 0x7F7E4A57);
     kernelbase.proc(&WriteConsoleA, 0x45550ADA);
+
+    #[cfg(target_arch = "x86_64")]
     kernelbase.proc(&OutputDebugStringA, 0x58448029);
+
+    kernelbase.proc(&GetVersionExW, 0xADC522A9);
 
     kernelbase.proc(&LocalFree, 0x3A5DD394);
     kernelbase.proc(&FormatMessage, 0x8233A148);
@@ -112,7 +124,5 @@ pub(super) static KERNELBASE: Loader = Loader::new(|kernelbase| {
 
     // These may be here in newer versions, but if not will be loaded in
     // "advapi32.dll".
-    kernelbase.proc(&IsWellKnownSID, 0xF855936A);
-    kernelbase.proc(&CreateWellKnownSid, 0x25F61A8E);
-    kernelbase.proc(&CheckTokenMembership, 0xE42E234E);
+    // kernelbase.proc(&IsWellKnownSID, 0xF855936A);
 });

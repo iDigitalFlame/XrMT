@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![cfg(windows)]
+#![cfg(target_family = "windows")]
 
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
@@ -24,7 +24,7 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::ptr;
 
 use crate::sync::Once;
-use crate::util::stx::prelude::*;
+use crate::prelude::*;
 
 pub struct LazyLock<T, F = fn() -> T> {
     cell: UnsafeCell<InitCell<T, F>>,

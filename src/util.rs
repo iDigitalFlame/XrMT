@@ -19,6 +19,7 @@
 extern crate core;
 
 use core::cmp::{Ord, Ordering};
+use core::marker::Copy;
 
 pub mod crypt;
 pub mod log;
@@ -26,103 +27,9 @@ mod numbers;
 
 pub use self::numbers::*;
 
-#[cfg(all(windows, not(feature = "std")))]
-#[path = "device/winapi/std/stx/stx.rs"]
-pub mod stx;
-#[cfg(any(unix, feature = "std"))]
-#[cfg(unix)]
-pub mod stx {
-    extern crate alloc;
-    extern crate core;
-    extern crate std;
-
-    use alloc::string::ToString;
-    use core::option::Option;
-    use core::option::Option::{None, Some};
-    use core::result::Result;
-    use core::result::Result::{Err, Ok};
-
-    #[cfg_attr(rustfmt, rustfmt_skip)]
-    pub use std::*;
-
-    pub mod ffi {
-        extern crate std;
-
-        pub use std::ffi::{OsStr, OsString};
-        pub use std::path::{Path, PathBuf};
-    }
-    pub mod prelude {
-        pub extern crate alloc;
-        pub extern crate core;
-        pub extern crate std;
-
-        #[cfg(not(feature = "implant"))]
-        pub use alloc::format;
-        pub use alloc::vec;
-        #[cfg(not(feature = "implant"))]
-        pub use core::{todo, write, writeln};
-        pub use std::prelude::rust_2021::*;
-
-        pub use super::printer::*;
-    }
-
-    #[cfg(feature = "implant")]
-    mod printer {
-        #[macro_export]
-        macro_rules! print {
-            ($($arg:tt)*) => {{}};
-        }
-        #[macro_export]
-        macro_rules! println {
-            ($($arg:tt)*) => {{}};
-        }
-    }
-    #[cfg(not(feature = "implant"))]
-    mod printer {
-        extern crate std;
-        pub use std::{print, println};
-    }
-
-    #[inline]
-    pub fn abort() -> ! {
-        crate::process::abort()
-    }
-    #[inline]
-    pub fn panic(_msg: &str) -> ! {
-        #[cfg(not(feature = "implant"))]
-        {
-            if !_msg.is_empty() {
-                std::println!("panic start: {_msg}");
-                crate::bugtrack!("panic start: {_msg}");
-            }
-        }
-        abort()
-    }
-    #[inline]
-    pub fn take<T>(r: Option<T>) -> T {
-        match r {
-            Some(v) => v,
-            None => abort(),
-        }
-    }
-    #[inline]
-    pub fn unwrap<T, E: ToString>(r: Result<T, E>) -> T {
-        #[cfg(feature = "implant")]
-        match r {
-            Ok(v) => v,
-            Err(_) => abort(),
-        }
-        #[cfg(not(feature = "implant"))]
-        match r {
-            Ok(v) => v,
-            Err(e) => panic(&e.to_string()),
-        }
-    }
-}
-
 #[inline]
-pub fn copy(dst: &mut [u8], src: &[u8]) -> usize {
-    if src.len() == 0 || dst.len() == 0 {
+pub fn copy<T: Copy>(dst: &mut [T], src: &[T]) -> usize {
+    if src.is_empty() || dst.is_empty() {
         return 0;
     }
     let (j, k) = (dst.len(), src.len());
