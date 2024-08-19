@@ -102,3 +102,5 @@ _If you really want to use std with Windows, enable it with the `std` feature fl
 - NetBSD
   - Thread support works, but it's not super stable as the way it indicates
     Threads is kina weird. THey don't have TIDs but can be enumerated at least
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Z8Z4121TDS)

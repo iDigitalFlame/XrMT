@@ -43,6 +43,22 @@ pub struct RemotePEB {
     pub process_parameters:       usize,
 }
 
+/*
+
+typedef struct _API_SET_NAMESPACE {
+    ULONG Version;
+    ULONG Size;
+    ULONG Flags;
+    ULONG Count;
+    ULONG EntryOffset;
+    ULONG HashOffset;
+    ULONG HashFactor;
+} API_SET_NAMESPACE, *PAPI_SET_NAMESPACE;
+
+LOAD API NAMESPACES
+
+*/
+
 #[repr(C)]
 pub struct PEB {
     pub inheritied_address_space: u8,
@@ -71,7 +87,7 @@ pub struct PEB {
     pub kernel_callback_table:    usize,
     pad3:                         u32,
     pub alt_thunk_list_ptr32:     u32,
-    pub api_map:                  usize,
+    pub api_map:                  usize, // API_MAP SET
     pub tls_ex_count:             u32,
     pub tls_bitmap:               usize,
     pub tls_bitmap_bits:          [u32; 2],

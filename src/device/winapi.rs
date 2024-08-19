@@ -38,6 +38,8 @@ mod structs;
 #[cfg(not(target_pointer_width = "64"))]
 pub mod wow;
 
+pub mod load;
+
 macro_rules! syscall {
     ($address:expr, $t:ty, $($x:expr),*) => {
         core::mem::transmute::<*const (), $t>($address as _)($($x,)*)

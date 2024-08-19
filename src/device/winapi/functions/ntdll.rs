@@ -418,6 +418,9 @@ pub fn GetModuleHandleExW(flags: u32, name: &[u16]) -> Win32Result<Handle> {
 pub fn GetModuleHandleEx(flags: u32, name: impl MaybeString) -> Win32Result<Handle> {
     if flags & 0x4 != 0 {
         // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+        // TODO(dij): Maybe we can suppot this by looping through the modules
+        //            loaded and find one in-between the base address and module
+        //            size
         // NOTE(dij): This is too annoying to support.
         return Err(Win32Error::InvalidOperation);
     }

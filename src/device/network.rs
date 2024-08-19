@@ -495,7 +495,7 @@ mod inner {
     use crate::data::blob::Blob;
     use crate::device::network::{Address, HardwareAddress, Interface, Network};
     use crate::device::winapi;
-    use crate::io::{self, Error};
+    use crate::io;
     use crate::prelude::*;
 
     impl From<[u8; 8]> for HardwareAddress {

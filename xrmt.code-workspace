@@ -45,8 +45,8 @@
         //"rust-analyzer.cargo.target": "x86_64-pc-solaris",
         //"rust-analyzer.cargo.target": "x86_64-apple-darwin",
         //"rust-analyzer.cargo.target": "x86_64-unknown-freebsd",
-        "rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
-        //"rust-analyzer.cargo.target": "x86_64-pc-windows-gnu",
+        //"rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
+        "rust-analyzer.cargo.target": "x86_64-pc-windows-gnu",
         "cSpell.words": [
             "addrs",
             "amsi",
