@@ -1,0 +1,23 @@
+[package]
+name             = "xrmt-hash"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/objects/hash"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/objects/hash"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = []
+
+[target.'cfg(windows)'.dependencies]
+xrmt-io          = { path = "../../core/io",   default-features = false, features = [ "alloc" ] }
+
+[target.'cfg(not(windows))'.dependencies]
+xrmt-io          = { path = "../../core/io",   default-features = false, features = [ "std"   ] }

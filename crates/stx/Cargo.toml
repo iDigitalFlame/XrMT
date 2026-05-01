@@ -1,0 +1,45 @@
+[package]
+name             = "xrmt-stx"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/stx"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/stx"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                                                                                                                               ]
+bugs             = [                      "xrmt-bugtrack/bugs",                                                                                               "xrmt-winapi/bugs"   ]
+compat           = [                                                                                                                                                               ]
+crypt            = [ "strip",                                   "xrmt-crypt/crypt",                                                                           "xrmt-winapi/crypt"  ]
+no-support       = [                                                                                                                                                               ]
+pie              = [                                                                                                                                          "xrmt-winapi/pie"    ]
+print            = [                                                                                                                                                               ]
+std              = [ "xrmt-builtins/std",                                           "xrmt-data/std",   "xrmt-io/std",    "xrmt-net/std",                      "xrmt-winapi/std"    ]
+strip            = [                                                                "xrmt-data/strip", "xrmt-io/strip",  "xrmt-net/strip", "xrmt-time/strip", "xrmt-winapi/strip"  ]
+
+[dependencies]
+xrmt-builtins    = { path = "../core/builtins", default-features = false, features = [         ] }
+xrmt-bugtrack    = { path = "../bugtrack",      default-features = false, features = [         ] }
+xrmt-time        = { path = "../core/time",     default-features = false, features = [         ] }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-crypt       = { path = "../core/crypt",    default-features = false, features = [         ] }
+xrmt-data        = { path = "../objects/data",  default-features = false, features = [         ] }
+xrmt-io          = { path = "../core/io",       default-features = false, features = [ "alloc" ] }
+xrmt-net         = { path = "./net",            default-features = false, features = [         ] }
+xrmt-winapi      = { path = "../winapi",        default-features = false, features = [         ] }
+
+[target.'cfg(not(windows))'.dependencies]
+libc             = { version = "0.2.175",       default-features = false, features = [         ] }
+xrmt-io          = { path = "../core/io",       default-features = false, features = [ "std"   ] }
+xrmt-net         = { path = "./net",            default-features = false, features = [ "std"   ] }
+
+# TODO(dij): Eventually change "xrmt-data" "default-features" to "true" to
+#            enable "leb_sizes"

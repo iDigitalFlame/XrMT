@@ -1,48 +1,41 @@
 [package]
-name                = "xrmt"
-# build               = "build.rs"
-readme              = "README.md"
-license             = "GPL 3.0"
-version             = "0.0.1"
-edition             = "2021"
-authors             = ["iDigitalFlame"]
-publish             = false
-homepage            = "https://github.com/iDigitalFlame/xrmt"
-repository          = "https://github.com/iDigitalFlame/xrmt"
-description         = ""
+name             = "xrmt"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt"
+repository       = "https://github.com/iDigitalFlame/xrmt"
+description      = ""
 
-# [lib]
-# path                = "src/lib.rs"
-# crate-type          = ["cdylib"]
+[lib]
+path             = "src/lib.rs"
 
 [features]
-default             = []
-std                 = []
-bugs                = []
-snap                = []
-crypt               = ["strip"]
-strip               = []
-ews                 = []
-pie                 = []
-no_proxy            = []
-heap_track          = ["bugs"]
-limit_tiny          = []
-limit_small         = []
-limit_large         = []
-limit_medium        = []
-limit_no_frag       = []
+default          = [                                                                                                                                         ]
+bugs             = [           "xrmt-bugtrack/bugs", "xrmt-coco/bugs",                     "xrmt-objects/bugs",  "xrmt-stx/bugs" ,      "xrmt-winapi/bugs"   ]
+compat           = [                                                                                             "xrmt-stx/compat"                           ]
+crypt            = [ "strip",                        "xrmt-coco/crypt", "xrmt-core/crypt", "xrmt-objects/crypt", "xrmt-stx/crypt",      "xrmt-winapi/crypt"  ]
+no-support       = [                                                                                             "xrmt-stx/no-support"                       ]
+pie              = [                                 "xrmt-coco/pie",                                            "xrmt-stx/pie",        "xrmt-winapi/pie"    ]
+print            = [                                                                                             "xrmt-stx/print"                            ]
+std              = [                                 "xrmt-coco/std",   "xrmt-core/std",   "xrmt-objects/std"  , "xrmt-stx/std",        "xrmt-winapi/std"    ]
+strip            = [                                 "xrmt-coco/strip", "xrmt-core/strip", "xrmt-objects/strip", "xrmt-stx/strip",      "xrmt-winapi/strip"  ]
 
-[profile.dev]
-panic               = "abort"
+#ews             = []
+#no_proxy        = []
+#limit_tiny      = []
+#limit_small     = []
+#limit_large     = []
+#limit_medium    = []
+#limit_no_frag   = []
 
-[profile.release]
-lto                 = false
-panic               = "abort"
-debug               = false
-strip               = true
-opt-level           = 3
-overflow-checks     = false
-debug-assertions    = false
-
-[target.'cfg(unix)'.dependencies]
-libc                = { version = "0.2.155",  default-features = false, features = ["extra_traits"] }
+[dependencies]
+xrmt-bugtrack    = { path = "./crates/bugtrack", default-features = false, features = [] }
+xrmt-coco        = { path = "./crates/coco",     default-features = true,  features = [] }
+xrmt-core        = { path = "./crates/core",     default-features = false, features = [] }
+xrmt-objects     = { path = "./crates/objects",  default-features = false, features = [] }
+xrmt-stx         = { path = "./crates/stx",      default-features = true,  features = [] }
+xrmt-winapi      = { path = "./crates/winapi",   default-features = true,  features = [] }

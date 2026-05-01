@@ -1,0 +1,20 @@
+[package]
+name             = "xrmt-io"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/core/io"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/core/io"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [ "alloc" ]
+alloc            = [         ]
+std              = [         ]
+strip            = [         ]

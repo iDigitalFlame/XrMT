@@ -1,0 +1,29 @@
+[package]
+name             = "xrmt-random"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/objects/random"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/objects/random"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [ "sys"                                                      ]
+crypt            = [                        "xrmt-crypt/crypt"                  ]
+strip            = [                                            "xrmt-io/strip" ]
+sys              = [ "libc", "xrmt-winapi"                                      ]
+
+[target.'cfg(windows)'.dependencies]
+xrmt-io          = { path = "../../core/io",    default-features = false, features = [ "alloc" ]                  }
+xrmt-winapi      = { path = "../../winapi",     default-features = false, features = [         ], optional = true }
+
+[target.'cfg(not(windows))'.dependencies]
+libc             = { version = "0.2.175",       default-features = false, features = [         ], optional = true }
+xrmt-io          = { path = "../../core/io",    default-features = false, features = [ "std"   ]                  }
+xrmt-crypt       = { path = "../../core/crypt", default-features = false, features = [         ]                  }

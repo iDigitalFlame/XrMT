@@ -1,0 +1,22 @@
+[package]
+name             = "xrmt-memory"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/objects/memory"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/objects/memory"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                      ]
+bugs             = [ "xrmt-bugtrack/bugs" ]
+strip            = [                      ]
+
+[dependencies]
+xrmt-bugtrack    = { path = "../../bugtrack", default-features = false, features = [] }

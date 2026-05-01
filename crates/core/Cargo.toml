@@ -1,0 +1,32 @@
+[package]
+name             = "xrmt-core"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/core"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/core"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                                                       ]
+crypt            = [  "strip",                      "xrmt-crypt/crypt"                                     ]
+std              = [           "xrmt-builtins/std",                     "xrmt-io/std"                      ]
+strip            = [                                                    "xrmt-io/strip", "xrmt-time/strip" ]
+
+[dependencies]
+xrmt-builtins    = { path = "./builtins", default-features = false, features = [         ] }
+xrmt-crypt       = { path = "./crypt",    default-features = false, features = [         ] }
+xrmt-text        = { path = "./text",     default-features = false, features = [ "alloc" ] }
+xrmt-time        = { path = "./time",     default-features = false, features = [         ] }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-io          = { path = "./io",       default-features = false, features = [ "alloc" ] }
+
+[target.'cfg(not(windows))'.dependencies]
+xrmt-io          = { path = "./io",       default-features = false, features = [ "std"   ] }

@@ -1,0 +1,30 @@
+[package]
+name             = "xrmt-data"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/objects/data"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/objects/data"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [ "leb_sizes"                  ]
+leb_sizes        = [                              ]
+limit_signed     = [                              ]
+std              = [                              ]
+strip            = [              "xrmt-io/strip" ]
+
+[dependencies]
+xrmt-text        = { path = "../../core/text", default-features = false, features = [ "alloc" ] }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-io          = { path = "../../core/io",   default-features = false, features = [ "alloc" ] }
+
+[target.'cfg(not(windows))'.dependencies]
+xrmt-io          = { path = "../../core/io",   default-features = false, features = [ "std"   ] }

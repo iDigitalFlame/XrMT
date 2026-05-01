@@ -1,0 +1,18 @@
+[package]
+name             = "xrmt-crypt"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/core/crypt"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/core/crypt"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = []
+crypt            = []

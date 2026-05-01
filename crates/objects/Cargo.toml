@@ -1,0 +1,32 @@
+[package]
+name             = "xrmt-objects"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/objects"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/objects"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                                             ]
+bugs             = [                                    "xrmt-memory/bugs"                       ]
+crypt            = [ "strip",                                                "xrmt-random/crypt" ]
+leb_sizes        = [          "xrmt-data/leb_sizes"                                              ]
+limit_signed     = [          "xrmt-data/limit_signed"                                           ]
+std              = [          "xrmt-data/std"                                                    ]
+strip            = [          "xrmt-data/strip",        "xrmt-memory/strip", "xrmt-random/strip" ]
+
+[dependencies]
+xrmt-data        = { path = "./data",   default-features = false, features = [       ] }
+xrmt-hash        = { path = "./hash",   default-features = false, features = [       ] }
+xrmt-memory      = { path = "./memory", default-features = false, features = [       ] }
+xrmt-random      = { path = "./random", default-features = false, features = [ "sys" ] }
+
+# TODO(dij): Eventually change "xrmt-data" "default-features" to "true" to
+#            enable "leb_sizes"

@@ -1,0 +1,33 @@
+[package]
+name             = "xrmt-coco"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/coco"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/coco"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                                                              ]
+bugs             = [           "xrmt-bugtrack/bugs",                      "xrmt-stx/bugs" ,  "xrmt-winapi/bugs"   ]
+crypt            = [ "strip",                        "xrmt-random/crypt", "xrmt-stx/crypt",  "xrmt-winapi/crypt"  ]
+pie              = [                                                      "xrmt-stx/pie",    "xrmt-winapi/pie"    ]
+std              = [                                                      "xrmt-stx/std",    "xrmt-winapi/std"    ]
+strip            = [                                 "xrmt-random/strip", "xrmt-stx/strip",  "xrmt-winapi/strip"  ]
+
+[dependencies]
+xrmt-bugtrack    = { path = "../bugtrack",       default-features = false, features = [] }
+xrmt-stx         = { path = "../stx",            default-features = false, features = [] }
+xrmt-random      = { path = "../objects/random", default-features = false, features = [ "sys" ] }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-winapi      = { path = "../winapi",         default-features = false, features = [] }
+
+[target.'cfg(not(windows))'.dependencies]
+libc             = { version = "0.2.175",        default-features = false, features = [] }

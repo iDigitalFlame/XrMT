@@ -1,0 +1,18 @@
+[package]
+name             = "xrmt-winapi-fnv"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/winapi/fnv"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/winapi/fnv"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+proc-macro       = true
+
+[features]
+default          = []

@@ -1,0 +1,27 @@
+[package]
+name             = "xrmt-log"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/log"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/log"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [ "xrmt-io", "xrmt-io/std", "xrmt-ffi", "xrmt-ffi/std", "xrmt-time" ]
+strip            = [ "xrmt-io/strip" ]
+
+[target.'cfg(windows)'.features]
+default          = [ "xrmt-io", "xrmt-io/alloc", "xrmt-ffi", "xrmt-time" ]
+strip            = [ "xrmt-io/strip" ]
+
+[dependencies]
+xrmt-io          = { path = "../io", default-features = false, features = [], optional = true }
+xrmt-ffi         = { path = "../ffi", default-features = false, features = [], optional = true }
+xrmt-time        = { path = "../time", default-features = false, features = [], optional = true }

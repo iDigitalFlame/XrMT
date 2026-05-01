@@ -1,0 +1,21 @@
+[package]
+name             = "xrmt-time"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/core/time"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/core/time"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = []
+strip            = []
+
+[target.'cfg(not(windows))'.dependencies]
+libc             = { version = "0.2.175", default-features = false, features = [] }

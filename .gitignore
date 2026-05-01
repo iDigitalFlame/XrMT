@@ -4,3 +4,5 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 sdks/**
+builds/
+*.exe

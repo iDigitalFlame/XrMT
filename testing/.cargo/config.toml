@@ -1,0 +1,22 @@
+#
+#
+
+[target.'cfg(windows)']
+rustflags = [
+    # "-C", "link-arg=-fuse-ld=lld",
+    "-C", "linker=lld-link",
+    "-C", "link-arg=/SUBSYSTEM:CONSOLE,5.01",
+    # "-C", "link-arg=/SUBSYSTEM:WINDOWS",
+    "-C", "link-arg=/nodefaultlib",
+    "-C", "link-arg=/entry:_main",
+    "-C", "link-arg=/build-id:no",
+    #"-Z", "fmt-debug=none",
+    # ^ Removes "fmt" code
+    #"-Z", "build-std=core",
+    #"-Z", "location-detail=none",
+    # ^ Removes stack tracing details
+    #"-Zbuild-std=std,panic_abort",
+    #"-Z", "build-std-features=panic_immediate_abort",
+]
+
+# Keeping for reference: "-C", "link-arg=/emittoolversioninfo:no",

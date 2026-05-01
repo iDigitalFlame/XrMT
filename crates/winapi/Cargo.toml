@@ -1,0 +1,35 @@
+[package]
+name             = "xrmt-winapi"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/winapi"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/winapi"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                                                                           ]
+bugs             = [           "xrmt-bugtrack/bugs"                                                                            ]
+crypt            = [ "strip",                        "xrmt-crypt/crypt"                                                        ]
+pie              = [                                                                                                           ]
+std              = [                                                     "xrmt-data/std",   "xrmt-io/std"                      ]
+strip            = [                                                     "xrmt-data/strip", "xrmt-io/strip", "xrmt-time/strip" ]
+
+[dependencies]
+xrmt-data        = { path = "../objects/data", default-features = false, features = [         ] }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-bugtrack    = { path = "../bugtrack",     default-features = false, features = [         ] }
+xrmt-crypt       = { path = "../core/crypt",   default-features = false, features = [         ] }
+xrmt-io          = { path = "../core/io",      default-features = false, features = [ "alloc" ] }
+xrmt-time        = { path = "../core/time",    default-features = false, features = [         ] }
+xrmt-winapi-fnv  = { path = "./fnv",           default-features = false, features = [         ] }
+
+# TODO(dij): Eventually change "xrmt-data" "default-features" to "true" to
+#            enable "leb_sizes"

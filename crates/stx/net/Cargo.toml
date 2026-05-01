@@ -1,0 +1,24 @@
+[package]
+name             = "xrmt-net"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/stx/net"
+repository       = "https://github.com/iDigitalFlame/xrmt/stx/net"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                                                         ]
+std              = [ "xrmt-data/std",   "xrmt-io/std",   "xrmt-winapi/std"   ]
+strip            = [ "xrmt-data/strip", "xrmt-io/strip", "xrmt-winapi/strip" ]
+
+[target.'cfg(windows)'.dependencies]
+xrmt-data        = { path = "../../objects/data", default-features = true,  features = [         ] }
+xrmt-io          = { path = "../../core/io",      default-features = false, features = [ "alloc" ] }
+xrmt-winapi      = { path = "../../winapi",       default-features = false, features = [         ] }

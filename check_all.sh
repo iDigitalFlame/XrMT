@@ -54,7 +54,7 @@ printf '\e[1;34;40mChecking "%s"\e[1;34;40m..\n' "x86_64-apple-ios"
 cargo check --target x86_64-apple-ios || exit 1
 printf '\e[1;34;40mChecking "%s"\e[1;34;40m..\n' "x86_64-apple-darwin"
 cargo check --target x86_64-apple-darwin || exit 1
-# printf '\e[1;34;40mChecking "%s"\e[1;34;40m..\n' "x86_64-fortanix-unknown-sgx"
+printf '\e[1;34;40mChecking "%s"\e[1;34;40m..\n' "x86_64-fortanix-unknown-sgx"
 # cargo check --target x86_64-fortanix-unknown-sgx || exit 1
 printf '\e[1;34;40mChecking "%s"\e[1;34;40m..\n' "x86_64-linux-android"
 cargo check --target x86_64-linux-android || exit 1

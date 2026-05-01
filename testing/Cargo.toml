@@ -1,0 +1,38 @@
+[package]
+name             = "xrmt-testing"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt"
+repository       = "https://github.com/iDigitalFlame/xrmt"
+description      = ""
+
+# [lib]
+# path           = "src/lib.rs"
+# crate-type     = ["cdylib"]
+
+[features]
+default          = []
+
+[dependencies]
+xrmt             = { path = "../", default-features = true, features = [ "compat", "bugs" ] }
+#xrmt-coco        = { path = "../crates/coco", default-features = true, features = [  ] }
+#xrmt-objects        = { path = "../crates/objects", default-features = true, features = [  ] }
+#xrmt-core        = { path = "../crates/core", default-features = true, features = [  ] }
+xrmt-net        = { path = "../crates/stx/net", default-features = true, features = [  ] }
+xrmt-winapi        = { path = "../crates/winapi", default-features = true, features = [ "pie" ] }
+
+[profile.dev]
+panic            = "abort"
+
+[profile.release]
+lto              = false
+panic            = "abort"
+debug            = false
+strip            = true
+opt-level        = 3
+overflow-checks  = false
+debug-assertions = false

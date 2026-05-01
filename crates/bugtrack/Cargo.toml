@@ -1,0 +1,24 @@
+[package]
+name             = "xrmt-bugtrack"
+readme           = "README.md"
+license          = "GPL 3.0"
+version          = "0.0.1"
+edition          = "2024"
+authors          = [ "iDigitalFlame" ]
+publish          = false
+homepage         = "https://github.com/iDigitalFlame/xrmt/crates/bugtrack"
+repository       = "https://github.com/iDigitalFlame/xrmt/crates/bugtrack"
+description      = ""
+
+[lib]
+path             = "src/lib.rs"
+
+[features]
+default          = [                          ]
+bugs             = [ "xrmt-text", "xrmt-time" ]
+
+[dependencies]
+xrmt-time        = { path = "../core/time", default-features = false, features = [], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+xrmt-text        = { path = "../core/text", default-features = false, features = [], optional = true }
