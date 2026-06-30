@@ -29,7 +29,7 @@ use core::convert::{AsMut, AsRef, From};
 use core::default::Default;
 use core::hint::{spin_loop, unlikely};
 use core::marker::{Send, Sized, Sync};
-use core::mem::{align_of_val_raw, drop, ManuallyDrop, MaybeUninit};
+use core::mem::{drop, Alignment, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut, Drop, FnOnce};
 use core::option::Option::{self, None, Some};
 use core::ptr::{addr_eq, drop_in_place, read, slice_from_raw_parts_mut, NonNull};
@@ -675,7 +675,7 @@ impl<T: ?Sized, A: Allocator> Ref<T, A> {
         let v = Layout::new::<Reference<()>>();
         Ref {
             alloc,
-            ptr: unsafe { NonNull::new_unchecked(ptr.byte_sub(v.size() + v.padding_needed_for(align_of_val_raw(ptr))) as *mut Reference<T>) },
+            ptr: unsafe { NonNull::new_unchecked(ptr.byte_sub(v.size() + v.padding_needed_for(Alignment::of_val_raw(ptr))) as *mut Reference<T>) },
         }
     }
 
@@ -897,7 +897,7 @@ impl<T: ?Sized, A: Allocator> Weak<T, A> {
         let v = Layout::new::<Reference<()>>();
         Weak {
             alloc,
-            ptr: unsafe { NonNull::new_unchecked(ptr.byte_sub(v.size() + v.padding_needed_for(align_of_val_raw(ptr))) as *mut Reference<T>) },
+            ptr: unsafe { NonNull::new_unchecked(ptr.byte_sub(v.size() + v.padding_needed_for(Alignment::of_val_raw(ptr))) as *mut Reference<T>) },
         }
     }
 

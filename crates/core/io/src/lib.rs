@@ -318,16 +318,13 @@
     all(not(feature = "std")),
     allow(incomplete_features, internal_features),
     feature(
+        core_io,
         allocator_api,
-        core_io_borrowed_buf,
-        maybe_uninit_fill,
-        maybe_uninit_slice,
-        maybe_uninit_write_slice,
-        ptr_as_uninit,
-        slice_internals,
         specialization,
-        unchecked_neg,
-        unchecked_shifts,
+        slice_internals,
+        maybe_uninit_fill,
+        core_io_borrowed_buf,
+        borrowed_buf_init,
     )
 )]
 

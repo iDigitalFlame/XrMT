@@ -122,6 +122,7 @@ pub fn expand<T: PathByte, E: Environment<T>>(src: Vec<T>, env: &E) -> Vec<T> {
     }
 }
 pub fn expand_slice<T: PathByte, E: Environment<T>>(src: &[T], env: &E) -> Vec<T> {
+    // TODO(dij): VALID CHECK SEE IF THIS WORKS PROPERLY
     let mut b = Vec::with_capacity(src.len());
     let (mut i, mut c, mut n) = (0, 0, 0);
     while i < src.len() {
@@ -179,6 +180,17 @@ pub fn expand_slice<T: PathByte, E: Environment<T>>(src: &[T], env: &E) -> Vec<T
         i += 1;
     }
     if c > 0 && n > 0 && n < src.len() {
+        // TODO(dij): Check, I think the -1 duplicates stuff
+        /*
+        e HOME None
+        e HOME 2
+        d$HOME
+        abcgd373/home/dij-8373/home/dij}-sdfhdkjdkdd$HOME <- broken
+        e HOME None
+        e HOME 2
+        d$HOME
+        abcgd373/home/dij-8373/home/dij}-sdfhdkjdkd$HOME <- broken
+        */
         b.extend_from_slice(unsafe { src.get_unchecked(n - 1..) });
     }
     b

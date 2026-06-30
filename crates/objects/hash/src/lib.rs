@@ -16,7 +16,6 @@
 
 #![no_implicit_prelude]
 #![no_std]
-#![feature(unchecked_shifts)]
 
 extern crate core;
 

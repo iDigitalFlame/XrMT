@@ -16,7 +16,7 @@
 
 #![no_implicit_prelude]
 #![no_std]
-#![feature(allocator_api, unchecked_neg, unchecked_shifts)]
+#![feature(allocator_api)]
 
 extern crate core;
 

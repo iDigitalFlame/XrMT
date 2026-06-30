@@ -17,18 +17,7 @@
 #![no_implicit_prelude]
 #![no_std]
 #![allow(async_fn_in_trait, internal_features)]
-#![feature(
-    allocator_api,
-    atomic_try_update,
-    core_io_borrowed_buf,
-    likely_unlikely,
-    maybe_uninit_fill,
-    maybe_uninit_slice,
-    slice_internals,
-    trait_alias,
-    unchecked_neg,
-    unchecked_shifts
-)]
+#![feature(allocator_api, likely_unlikely, slice_internals, trait_alias)]
 #![cfg_attr(
     not(target_family = "windows"),
     feature(buf_read_has_data_left, can_vector, tcp_linger, read_buf, seek_stream_len)

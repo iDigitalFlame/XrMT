@@ -28,41 +28,4 @@ use xrmt::stx::println;
 use xrmt_winapi::functions::{LsaOpenPolicy, SleepEx};
 use xrmt_winapi::structs::{Handle, WCharLike};
 
-pub fn main() {
-    // 0x1 - POLICY_VIEW_LOCAL_INFORMATION
-    let h = LsaOpenPolicy(0x1, WCharLike::Null).unwrap();
-
-    println!("LSA Handle: {:?}", *h);
-
-    let k = unsafe { from_raw_parts(**h as *const u8, 0x38) };
-
-    println!("LSA OBJ? {k:?}");
-
-    let _ = SleepEx(30_000_000, false).unwrap();
-}
-
-#[derive(Debug)]
-#[repr(C)]
-struct AA {
-    sig:      u32,
-    ty:       u32,
-    refcount: u32,
-    access:   u32,
-    handle:   Handle,
-    trust:    u8,
-    parent:   *const AA,
-}
-
-/*
-typedef struct _LSA_DB_OBJECT
-{
-    ULONG Signature;
-    LSA_DB_OBJECT_TYPE ObjectType;
-    ULONG RefCount;
-    ACCESS_MASK Access;
-    HANDLE KeyHandle;
-    BOOLEAN Trusted;
-    struct _LSA_DB_OBJECT *ParentObject;
-} LSA_DB_OBJECT, *PLSA_DB_OBJECT;
-
-  */
+pub fn main() {}

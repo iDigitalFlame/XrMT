@@ -120,7 +120,7 @@ impl<const N: usize> AsyncWrite for Cursor<[u8; N]> {
     }
 }
 
-impl<'a> AsyncWrite for BorrowedCursor<'a> {
+impl<'a> AsyncWrite for BorrowedCursor<'a, u8> {
     #[inline]
     async fn async_flush(&mut self) -> IoResult<()> {
         Ok(())

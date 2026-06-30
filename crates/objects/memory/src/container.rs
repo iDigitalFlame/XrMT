@@ -251,7 +251,7 @@ impl Entry {
         if layout.size() == 0 {
             // Return an empty pointer for ZST (Zero Size Types) as this is what
             // the std allocator does.
-            return Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0));
+            return Ok(NonNull::slice_from_raw_parts(layout.dangling_ptr(), 0));
         }
         let l = layout.pad_to_align();
         // Alignment check is preformed in the 'alloc' call and will panic if it

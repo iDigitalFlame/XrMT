@@ -344,7 +344,7 @@ impl Default for Sink {
     }
 }
 
-impl<'a> Write for BorrowedCursor<'a> {
+impl<'a> Write for BorrowedCursor<'a, u8> {
     #[inline]
     fn is_write_vectored(&self) -> bool {
         false

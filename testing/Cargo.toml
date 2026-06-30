@@ -19,9 +19,9 @@ default          = []
 
 [dependencies]
 xrmt             = { path = "../", default-features = true, features = [ "compat", "bugs" ] }
-#xrmt-coco        = { path = "../crates/coco", default-features = true, features = [  ] }
-#xrmt-objects        = { path = "../crates/objects", default-features = true, features = [  ] }
-#xrmt-core        = { path = "../crates/core", default-features = true, features = [  ] }
+xrmt-coco        = { path = "../crates/coco", default-features = true, features = [  ] }
+xrmt-objects        = { path = "../crates/objects", default-features = true, features = [  ] }
+xrmt-core        = { path = "../crates/core", default-features = true, features = [  ] }
 xrmt-net        = { path = "../crates/stx/net", default-features = true, features = [  ] }
 xrmt-winapi        = { path = "../crates/winapi", default-features = true, features = [ "pie" ] }
 

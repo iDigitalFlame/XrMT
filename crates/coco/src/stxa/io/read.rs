@@ -70,13 +70,13 @@ pub trait AsyncRead {
         Guard::new(buf).exec(async |v| read_to_end(self, v).await).await
     }
     #[inline]
-    async fn async_read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
-        let n = self.async_read(buf.ensure_init().init_mut()).await?;
-        buf.advance(n);
+    async fn async_read_buf(&mut self, mut buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        let n = self.async_read(buf.ensure_init()).await?;
+        buf.advance_checked(n);
         Ok(())
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         read_buf_exact(self, cur).await
     }
 }
@@ -149,15 +149,15 @@ impl AsyncRead for &[u8] {
         self.read_to_end(buf)
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(cur)
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         self.read_to_string(buf)
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(cur)
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.read_buf_exact(cur)
     }
 }
@@ -175,15 +175,15 @@ impl AsyncRead for Empty {
         self.read_to_end(buf)
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(cur)
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         self.read_to_string(buf)
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(cur)
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.read_buf_exact(cur)
     }
 }
@@ -201,15 +201,15 @@ impl AsyncRead for Repeat {
         Err(IoError::from(ErrorKind::OutOfMemory))
     }
     #[inline]
-    async fn async_read_buf(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(buf)
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, _: &mut String) -> IoResult<usize> {
         Err(IoError::from(ErrorKind::OutOfMemory))
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(buf)
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.read_buf_exact(buf)
     }
 }
@@ -242,15 +242,15 @@ impl<T: AsRef<[u8]>> AsyncRead for Cursor<T> {
         self.read_to_end(buf)
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(cur)
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         self.read_to_string(buf)
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(cur)
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.read_buf_exact(cur)
     }
 }
@@ -269,15 +269,15 @@ impl<A: Allocator> AsyncRead for VecDeque<u8, A> {
         self.read_to_end(buf)
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(cur)
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         self.read_to_string(buf)
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(cur)
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.read_buf_exact(cur)
     }
 }
@@ -306,15 +306,15 @@ impl<A: Allocator, T: ?Sized + AsyncRead> AsyncRead for Box<T, A> {
         (**self).async_read_to_end(buf).await
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        (**self).async_read_buf(cur).await
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         (**self).async_read_to_string(buf).await
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        (**self).async_read_buf(cur).await
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         (**self).async_read_buf_exact(cur).await
     }
 }
@@ -381,15 +381,15 @@ impl<T: ?Sized + AsyncRead> AsyncRead for &mut T {
         (**self).async_read_to_end(buf).await
     }
     #[inline]
-    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        (**self).async_read_buf(cur).await
-    }
-    #[inline]
     async fn async_read_to_string(&mut self, buf: &mut String) -> IoResult<usize> {
         (**self).async_read_to_string(buf).await
     }
     #[inline]
-    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    async fn async_read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        (**self).async_read_buf(cur).await
+    }
+    #[inline]
+    async fn async_read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         (**self).async_read_buf_exact(cur).await
     }
 }
@@ -404,10 +404,6 @@ impl<T: AsyncRead> Read for BlockingRead<T> {
         link(self.0.async_read_exact(buf))
     }
     #[inline]
-    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
-        link(self.0.async_read_buf(buf))
-    }
-    #[inline]
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> IoResult<usize> {
         link(self.0.async_read_to_end(buf))
     }
@@ -416,7 +412,11 @@ impl<T: AsyncRead> Read for BlockingRead<T> {
         link(self.0.async_read_to_string(buf))
     }
     #[inline]
-    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        link(self.0.async_read_buf(buf))
+    }
+    #[inline]
+    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         link(self.0.async_read_buf_exact(cur))
     }
 }
@@ -479,10 +479,6 @@ impl<T: AsyncRead> Read for BlockingReadRef<'_, T> {
         link(self.0.async_read_exact(buf))
     }
     #[inline]
-    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
-        link(self.0.async_read_buf(buf))
-    }
-    #[inline]
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> IoResult<usize> {
         link(self.0.async_read_to_end(buf))
     }
@@ -491,7 +487,11 @@ impl<T: AsyncRead> Read for BlockingReadRef<'_, T> {
         link(self.0.async_read_to_string(buf))
     }
     #[inline]
-    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        link(self.0.async_read_buf(buf))
+    }
+    #[inline]
+    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         link(self.0.async_read_buf_exact(cur))
     }
 }
@@ -580,13 +580,12 @@ async fn read_exact<T: ?Sized + AsyncRead>(r: &mut T, mut b: &mut [u8]) -> IoRes
     Ok(())
 }
 async fn read_to_end<T: ?Sized + AsyncRead>(r: &mut T, b: &mut Vec<u8>) -> IoResult<usize> {
-    let (s, c, mut i) = (b.len(), b.capacity(), 0usize);
+    let (s, c) = (b.len(), b.capacity());
     loop {
         if b.len() == b.capacity() {
             b.reserve(0x20)
         }
         let mut z = BorrowedBuf::from(b.spare_capacity_mut());
-        unsafe { z.set_init(i) };
         let mut v = z.unfilled();
         match r.async_read_buf(v.reborrow()).await {
             Ok(()) => (),
@@ -596,7 +595,6 @@ async fn read_to_end<T: ?Sized + AsyncRead>(r: &mut T, b: &mut Vec<u8>) -> IoRes
         if v.written() == 0 {
             return Ok(unsafe { b.len().unchecked_sub(s) });
         }
-        i = v.init_mut().len();
         let n = z.filled().len();
         unsafe { b.set_len(n + b.len()) };
         if b.len() == b.capacity() && b.capacity() == c {
@@ -642,7 +640,7 @@ async fn read<T: ?Sized + AsyncBufRead>(r: &mut T, delim: u8, b: &mut Vec<u8>) -
         }
     }
 }
-async fn read_buf_exact<T: ?Sized + AsyncRead>(r: &mut T, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
+async fn read_buf_exact<T: ?Sized + AsyncRead>(r: &mut T, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
     while cur.capacity() > 0 {
         let p = cur.written();
         match r.async_read_buf(cur.reborrow()).await {

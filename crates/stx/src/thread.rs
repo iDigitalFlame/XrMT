@@ -694,7 +694,7 @@ impl Builder {
     ///
     /// [`IoResult`]: crate::IoResult
     #[inline]
-    pub unsafe fn spawn_unchecked<F: FnOnce() -> T + Send, T: Send>(self, f: F) -> IoResult<JoinHandle<T>> {
+    pub unsafe fn spawn_unchecked<'a, F: FnOnce() -> T + Send + 'a, T: Send + 'a>(self, f: F) -> IoResult<JoinHandle<T>> {
         let x: Arc<UnsafeCell<Option<T>>> = Arc::new(UnsafeCell::new(None));
         let i = x.clone();
         let m = MaybeDangling::new(f);
@@ -704,12 +704,12 @@ impl Builder {
             drop(i);
         };
         let a = Box::into_raw(Box::new(unsafe {
-            Box::from_raw(Box::into_raw(Box::new(func)) as *mut (dyn FnOnce() + 'static))
+            Box::from_raw(Box::into_raw(Box::new(func)) as *mut (dyn FnOnce() + 'a))
         }));
         match CreateThreadEx(
             CURRENT_PROCESS,
             self.stack_size.unwrap_or(STACK_SIZE),
-            thread_main as usize,
+            thread_main as *const () as usize,
             a as *mut Box<dyn FnOnce()> as usize,
             false,
         ) {

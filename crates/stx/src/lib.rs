@@ -18,9 +18,8 @@
 #![no_std]
 #![allow(internal_features)]
 #![feature(
-    alloc_layout_extra,
     allocator_api,
-    core_intrinsics,
+    ptr_alignment_type,
     extend_one,
     format_args_nl,
     layout_for_ptr,
@@ -36,14 +35,12 @@
 #![cfg_attr(
     feature = "compat",
     feature(
-        assert_matches,
         bstr,
-        cfg_select,
         concat_bytes,
         const_format_args,
+        core_intrinsics,
         f128,
         f16,
-        new_range_api,
         pattern_type_macro,
         portable_simd,
         random,

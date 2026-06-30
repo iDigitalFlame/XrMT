@@ -17,7 +17,7 @@
 #![no_implicit_prelude]
 #![no_std]
 #![allow(internal_features)]
-#![feature(core_intrinsics, lang_items, unchecked_shifts)]
+#![feature(core_intrinsics, lang_items)]
 
 #[cfg(all(not(feature = "std"), not(target_os = "none")))]
 pub use self::builtins::*;
@@ -26,6 +26,10 @@ pub use self::builtins::*;
 #[doc(hidden)]
 #[path = "."]
 mod builtins {
+    extern crate core;
+
+    use core::ffi::c_void;
+
     #[cfg(target_arch = "x86_64")]
     #[doc(hidden)]
     #[path = "x64.rs"]
@@ -44,25 +48,25 @@ mod builtins {
     pub use self::asm::*;
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn strlen(b: *const u8) -> usize {
+    pub unsafe extern "C" fn strlen(b: *const i8) -> usize {
         inner::strlen(b)
     }
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn memset(b: *mut u8, c: i32, n: usize) -> *mut u8 {
+    pub unsafe extern "C" fn memset(b: *mut c_void, c: i32, n: usize) -> *mut c_void {
         inner::set(b, c as u8, n);
         b
     }
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn memcmp(j: *const u8, k: *const u8, n: usize) -> i32 {
+    pub unsafe extern "C" fn memcmp(j: *const c_void, k: *const c_void, n: usize) -> i32 {
         inner::compare(j, k, n)
     }
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+    pub unsafe extern "C" fn memcpy(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void {
         inner::copy_forward(d, s, n);
         d
     }
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+    pub unsafe extern "C" fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void {
         if (d as usize).wrapping_sub(s as usize) >= n {
             inner::copy_forward(d, s, n);
         } else {

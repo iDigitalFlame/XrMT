@@ -16,7 +16,6 @@
 
 #![no_implicit_prelude]
 #![no_std]
-#![feature(likely_unlikely, unchecked_neg, unchecked_shifts)]
 
 extern crate core;
 

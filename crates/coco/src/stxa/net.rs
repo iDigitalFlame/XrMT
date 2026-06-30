@@ -172,7 +172,7 @@ impl Read for TcpStream {
         self.0.read(buf)
     }
     #[inline]
-    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
         self.0.read_buf(buf)
     }
 }
@@ -182,7 +182,7 @@ impl Read for &TcpStream {
         (&self.0).read(buf)
     }
     #[inline]
-    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
         (&self.0).read_buf(buf)
     }
 }

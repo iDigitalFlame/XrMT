@@ -28,6 +28,7 @@
 
 extern crate core;
 
+use core::ffi::c_void;
 use core::intrinsics::likely;
 use core::mem::size_of;
 use core::ptr::read_volatile;
@@ -37,7 +38,7 @@ const MASK: usize = SIZE - 1;
 const THRESHOLD: usize = if SIZE * 0x2 > 0x10 { 2 * SIZE } else { 0x10 };
 
 #[inline]
-pub fn strlen(x: *const u8) -> usize {
+pub fn strlen(x: *const i8) -> usize {
     let (mut i, mut v) = (0usize, x);
     unsafe {
         while *v != 0 {
@@ -47,7 +48,7 @@ pub fn strlen(x: *const u8) -> usize {
     i
 }
 #[inline]
-pub fn set(x: *mut u8, c: u8, n: usize) {
+pub fn set(x: *mut c_void, c: u8, n: usize) {
     let (mut i, mut v) = (n, x);
     if likely(n >= THRESHOLD) {
         let a = (v as usize).wrapping_neg() & MASK;
@@ -60,7 +61,7 @@ pub fn set(x: *mut u8, c: u8, n: usize) {
     bytes(v, c, i);
 }
 #[inline]
-pub fn copy_forward(x: *mut u8, y: *const u8, n: usize) {
+pub fn copy_forward(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut i, mut d, mut s) = (n, x, y);
     if n >= THRESHOLD {
         let a = (d as usize).wrapping_neg() & MASK;
@@ -77,7 +78,7 @@ pub fn copy_forward(x: *mut u8, y: *const u8, n: usize) {
     forward_bytes(d, s, i);
 }
 #[inline]
-pub fn copy_backward(x: *mut u8, y: *const u8, n: usize) {
+pub fn copy_backward(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut i, mut d, mut s) = unsafe { (n, x.add(n), y.add(n)) };
     if n >= THRESHOLD {
         let a = d as usize & MASK;
@@ -94,10 +95,10 @@ pub fn copy_backward(x: *mut u8, y: *const u8, n: usize) {
     backward_bytes(d, s, i);
 }
 #[inline]
-pub fn compare(x: *const u8, y: *const u8, n: usize) -> i32 {
+pub fn compare(x: *const c_void, y: *const c_void, n: usize) -> i32 {
     let mut i = 0usize;
     while i < n {
-        let (a, b) = unsafe { (*x.add(i), *y.add(i)) };
+        let (a, b) = unsafe { (*x.add(i).cast::<u8>(), *y.add(i).cast::<u8>()) };
         if a != b {
             return a as i32 - b as i32;
         }
@@ -107,14 +108,14 @@ pub fn compare(x: *const u8, y: *const u8, n: usize) -> i32 {
 }
 
 #[inline]
-fn bytes(x: *mut u8, c: u8, n: usize) {
+fn bytes(x: *mut c_void, c: u8, n: usize) {
     let (i, mut v) = unsafe { (x.add(n), x) };
     while v < i {
-        unsafe { (*v, v) = (c, v.add(1)) };
+        unsafe { (*(v as *mut u8), v) = (c, v.add(1)) };
     }
 }
 #[inline]
-fn words(s: *mut u8, c: u8, n: usize) {
+fn words(s: *mut c_void, c: u8, n: usize) {
     let (mut v, mut i) = (c as usize, 8usize);
     while i < SIZE * 8 {
         (v, i) = unsafe { (v | v.unchecked_shl(i as u32), i * 0x2) };
@@ -125,7 +126,7 @@ fn words(s: *mut u8, c: u8, n: usize) {
     }
 }
 #[inline]
-fn forward(x: *mut u8, y: *const u8, n: usize) {
+fn forward(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, a) = unsafe { (x as *mut usize, x.add(n) as *mut usize) };
     let (mut s, b) = (
         (y as usize & !MASK) as *mut usize,
@@ -146,7 +147,7 @@ fn forward(x: *mut u8, y: *const u8, n: usize) {
     }
 }
 #[inline]
-fn backward(x: *mut u8, y: *const u8, n: usize) {
+fn backward(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, a) = unsafe { (x as *mut usize, x.sub(n) as *mut usize) };
     let (mut s, b) = (
         (y as usize & !MASK) as *mut usize,
@@ -168,7 +169,7 @@ fn backward(x: *mut u8, y: *const u8, n: usize) {
     }
 }
 #[inline]
-fn forward_align(x: *mut u8, y: *const u8, n: usize) {
+fn forward_align(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, mut s, a) = unsafe { (x as *mut usize, y as *mut usize, x.add(n) as *mut usize) };
     while d < a {
         unsafe {
@@ -178,17 +179,17 @@ fn forward_align(x: *mut u8, y: *const u8, n: usize) {
     }
 }
 #[inline]
-fn forward_bytes(x: *mut u8, y: *const u8, n: usize) {
+fn forward_bytes(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, mut s, a) = unsafe { (x, y, x.add(n)) };
     while d < a {
         unsafe {
-            *d = *s;
+            *(d as *mut u8) = *(s as *const u8);
             (d, s) = (d.add(1), s.add(1));
         }
     }
 }
 #[inline]
-fn backward_align(x: *mut u8, y: *const u8, n: usize) {
+fn backward_align(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, mut s, a) = unsafe { (x as *mut usize, y as *mut usize, x.sub(n) as *mut usize) };
     while a < d {
         unsafe {
@@ -198,12 +199,12 @@ fn backward_align(x: *mut u8, y: *const u8, n: usize) {
     }
 }
 #[inline]
-fn backward_bytes(x: *mut u8, y: *const u8, n: usize) {
+fn backward_bytes(x: *mut c_void, y: *const c_void, n: usize) {
     let (mut d, mut s, a) = unsafe { (x, y, x.sub(n)) };
     while a < d {
         unsafe {
             (d, s) = (d.add(1), s.add(1));
-            *d = *s;
+            *(d as *mut u8) = *(s as *const u8);
         }
     }
 }

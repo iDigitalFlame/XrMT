@@ -15,7 +15,7 @@
 //
 
 #![no_implicit_prelude]
-#![feature(allocator_api, alloc_layout_extra, likely_unlikely, unchecked_shifts)]
+#![feature(allocator_api, likely_unlikely)]
 #![cfg_attr(target_family = "windows", no_std)]
 #![cfg_attr(feature = "std", feature(raw_os_error_ty, io_error_more))]
 

@@ -127,7 +127,7 @@ unsafe impl GlobalAlloc for HeapAllocator {
 
 fn alloc(layout: Layout, f: u32) -> *mut u8 {
     if layout.size() == 0 {
-        return NonNull::slice_from_raw_parts(layout.dangling(), 0).as_ptr() as *mut u8;
+        return NonNull::slice_from_raw_parts(layout.dangling_ptr(), 0).as_ptr() as *mut u8;
     }
     if layout.align() <= MIN {
         return loader::heap_alloc(*GetProcessHeap(), f, layout.size()) as *mut u8;

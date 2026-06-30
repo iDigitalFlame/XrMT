@@ -18,7 +18,6 @@
 #![no_std]
 #![allow(incomplete_features, internal_features)]
 #![feature(
-    alloc_layout_extra,
     allocator_api,
     ascii_char,
     bstr,
@@ -26,14 +25,11 @@
     extend_one,
     likely_unlikely,
     panic_internals,
-    ptr_alignment_type,
     ptr_internals,
     sized_type_properties,
     slice_index_methods,
     specialization,
-    try_reserve_kind,
-    unchecked_shifts,
-    vec_into_raw_parts
+    try_reserve_kind
 )]
 #![cfg_attr(any(not(windows), feature = "std"), feature(can_vector, seek_stream_len))]
 

@@ -17,14 +17,7 @@
 // Initial Attributes
 // ==============================
 #![no_implicit_prelude]
-#![feature(
-    allocator_api,
-    layout_for_ptr,
-    box_as_ptr,
-    likely_unlikely,
-    coroutines,
-    unchecked_shifts
-)]
+//#![feature(allocator_api, layout_for_ptr, box_as_ptr, likely_unlikely)]
 #![cfg_attr(windows, no_std, no_main)]
 
 extern crate xrmt;

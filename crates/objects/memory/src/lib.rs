@@ -16,12 +16,6 @@
 
 #![no_implicit_prelude]
 #![no_std]
-#![feature(
-    alloc_layout_extra,
-    allocator_api,
-    likely_unlikely,
-    pointer_is_aligned_to,
-    unchecked_shifts
-)]
+#![feature(allocator_api, likely_unlikely, pointer_is_aligned_to)]
 
 pub mod container;

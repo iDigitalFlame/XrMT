@@ -31,6 +31,7 @@ extern crate core;
 use core::arch::asm;
 use core::clone::Clone;
 use core::cmp::{Eq, Ord};
+use core::ffi::c_void;
 use core::intrinsics::{unchecked_div, unchecked_rem};
 use core::marker::Copy;
 use core::mem::size_of;
@@ -41,7 +42,7 @@ use core::ops::FnOnce;
 use core::arch::x86_64::{__m128i, _mm_cmpeq_epi8, _mm_movemask_epi8, _mm_set1_epi8};
 
 #[cfg(target_feature = "sse2")]
-pub fn strlen(x: *const u8) -> usize {
+pub fn strlen(x: *const i8) -> usize {
     let (mut n, mut s) = (0usize, x);
     for _ in 0..4 {
         if unsafe { *s } == 0 {
@@ -84,7 +85,7 @@ pub fn strlen(x: *const u8) -> usize {
     }
 }
 #[cfg(not(target_feature = "sse2"))]
-pub fn strlen(x: *const u8) -> usize {
+pub fn strlen(x: *const c_void) -> usize {
     let (mut n, mut s) = (0usize, x);
     while s as usize & 7 != 0 {
         if unsafe { *s } == 0 {
@@ -117,7 +118,7 @@ pub fn strlen(x: *const u8) -> usize {
     }
 }
 #[inline]
-pub fn set(x: *mut u8, c: u8, count: usize) {
+pub fn set(x: *mut c_void, c: u8, count: usize) {
     #[cfg(target_feature = "ermsb")]
     unsafe {
         asm!(
@@ -156,7 +157,7 @@ pub fn set(x: *mut u8, c: u8, count: usize) {
     }
 }
 #[inline]
-pub fn compare(x: *const u8, y: *const u8, n: usize) -> i32 {
+pub fn compare(x: *const c_void, y: *const c_void, n: usize) -> i32 {
     let g = |mut a: *const u8, mut b: *const u8, n| {
         for _ in 0..n {
             unsafe {
@@ -178,7 +179,7 @@ pub fn compare(x: *const u8, y: *const u8, n: usize) -> i32 {
     l(x.cast(), y.cast(), n)
 }
 #[inline]
-pub fn copy_forward(x: *mut u8, y: *const u8, count: usize) {
+pub fn copy_forward(x: *mut c_void, y: *const c_void, count: usize) {
     #[cfg(target_feature = "ermsb")]
     unsafe {
         asm!(
@@ -217,7 +218,7 @@ pub fn copy_forward(x: *mut u8, y: *const u8, count: usize) {
     }
 }
 #[inline]
-pub fn copy_backward(x: *mut u8, y: *const u8, count: usize) {
+pub fn copy_backward(x: *mut c_void, y: *const c_void, count: usize) {
     let (p, q, b) = split(x, count);
     unsafe {
         asm!(
@@ -244,7 +245,7 @@ pub fn copy_backward(x: *mut u8, y: *const u8, count: usize) {
 }
 
 #[inline]
-fn split(x: *mut u8, count: usize) -> (usize, usize, usize) {
+fn split(x: *mut c_void, count: usize) -> (usize, usize, usize) {
     let p = ((0x8 - (x as usize & 0x7)) & 0x7).min(count);
     let c = count - p;
     unsafe { (p, c.unchecked_shr(3), c & 0x7) }

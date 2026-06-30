@@ -225,14 +225,12 @@ mod alloc {
             if self.capacity() < BASE_BUF_SIZE {
                 return default_copy(s, self);
             }
-            let (mut n, mut v) = (0u64, 0usize);
+            let mut n = 0u64;
             loop {
                 let r = self.buffer_mut();
                 let mut b = BorrowedBuf::from(r.spare_capacity_mut());
-                unsafe { b.set_init(v) };
                 if b.capacity() < BASE_BUF_SIZE {
                     self.flush_buf()?;
-                    v = 0;
                     continue;
                 }
                 let mut c = b.unfilled();
@@ -242,7 +240,7 @@ mod alloc {
                         if i == 0 {
                             break Ok(n);
                         }
-                        (n, v) = (n + i as u64, b.init_len() - i);
+                        n = n + i as u64;
                         unsafe { r.set_len(r.len() + i) };
                     },
                     Err(e) if e.kind() == ErrorKind::Interrupted => (),

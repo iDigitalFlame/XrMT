@@ -528,9 +528,9 @@ pub trait Read {
     /// This method makes it possible to return both data and an error but it is
     /// advised against.
     #[inline]
-    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
-        let n = self.read(buf.ensure_init().init_mut())?;
-        buf.advance(n);
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        let n = self.read(buf.ensure_init())?;
+        buf.advance_checked(n);
         Ok(())
     }
     /// Reads the exact number of bytes required to fill `cursor`.
@@ -555,7 +555,7 @@ pub trait Read {
     /// If this function returns an error, all bytes read will be appended to
     /// `cursor`.
     #[inline]
-    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         read_buf_exact(self, cur)
     }
 
@@ -1069,7 +1069,7 @@ impl Read for Empty {
         Ok(0)
     }
     #[inline]
-    fn read_buf(&mut self, _cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, _cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         Ok(())
     }
 }
@@ -1160,18 +1160,6 @@ impl Read for Repeat {
         buf.fill(self.0);
         Ok(())
     }
-    #[inline]
-    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
-        unsafe {
-            buf.as_mut().write_filled(self.0);
-            buf.advance_unchecked(buf.capacity());
-        }
-        Ok(())
-    }
-    #[inline]
-    fn read_buf_exact(&mut self, buf: BorrowedCursor<'_>) -> IoResult<()> {
-        self.read_buf(buf)
-    }
     #[cfg(feature = "alloc")]
     #[inline]
     fn read_to_end(&mut self, _: &mut crate::Vec<u8>) -> IoResult<usize> {
@@ -1181,6 +1169,18 @@ impl Read for Repeat {
     #[inline]
     fn read_to_string(&mut self, _: &mut crate::String) -> IoResult<usize> {
         Err(IoError::from(ErrorKind::OutOfMemory))
+    }
+    #[inline]
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        unsafe {
+            buf.as_mut().write_filled(self.0);
+            buf.advance_checked(buf.capacity());
+        }
+        Ok(())
+    }
+    #[inline]
+    fn read_buf_exact(&mut self, buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        self.read_buf(buf)
     }
 }
 
@@ -1218,26 +1218,6 @@ impl Read for &[u8] {
         *self = b;
         Ok(())
     }
-    #[inline]
-    fn read_buf(&mut self, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
-        let n = cur.capacity().min(self.len());
-        let (a, b) = unsafe { self.split_at_unchecked(n) };
-        cur.append(a);
-        *self = b;
-        Ok(())
-    }
-    #[inline]
-    fn read_buf_exact(&mut self, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
-        if cur.capacity() > self.len() {
-            cur.append(*self);
-            *self = &self[self.len()..];
-            return Err(IoError::from(ErrorKind::UnexpectedEof));
-        }
-        let (a, b) = unsafe { self.split_at_unchecked(cur.capacity()) };
-        cur.append(a);
-        *self = b;
-        Ok(())
-    }
     #[cfg(feature = "alloc")]
     #[inline]
     fn read_to_end(&mut self, buf: &mut crate::Vec<u8>) -> IoResult<usize> {
@@ -1247,6 +1227,14 @@ impl Read for &[u8] {
         // Will be in len bounds
         unsafe { *self = self.get_unchecked(n..) };
         Ok(n)
+    }
+    #[inline]
+    fn read_buf(&mut self, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        let n = cur.capacity().min(self.len());
+        let (a, b) = unsafe { self.split_at_unchecked(n) };
+        cur.append(a);
+        *self = b;
+        Ok(())
     }
     #[cfg(feature = "alloc")]
     #[inline]
@@ -1258,6 +1246,18 @@ impl Read for &[u8] {
         // Will be in len bounds
         unsafe { *self = self.get_unchecked(n..) };
         Ok(n)
+    }
+    #[inline]
+    fn read_buf_exact(&mut self, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        if cur.capacity() > self.len() {
+            cur.append(*self);
+            *self = &self[self.len()..];
+            return Err(IoError::from(ErrorKind::UnexpectedEof));
+        }
+        let (a, b) = unsafe { self.split_at_unchecked(cur.capacity()) };
+        cur.append(a);
+        *self = b;
+        Ok(())
     }
 }
 impl<T: ?Sized + Read> Read for &mut T {
@@ -1274,12 +1274,8 @@ impl<T: ?Sized + Read> Read for &mut T {
         (**self).read_exact(buf)
     }
     #[inline]
-    fn read_buf(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         (**self).read_buf(cur)
-    }
-    #[inline]
-    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_>) -> IoResult<()> {
-        (**self).read_buf_exact(cur)
     }
     #[cfg(feature = "alloc")]
     #[inline]
@@ -1290,6 +1286,10 @@ impl<T: ?Sized + Read> Read for &mut T {
     #[inline]
     fn read_to_string(&mut self, buf: &mut crate::String) -> IoResult<usize> {
         (**self).read_to_string(buf)
+    }
+    #[inline]
+    fn read_buf_exact(&mut self, cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
+        (**self).read_buf_exact(cur)
     }
 }
 
@@ -1320,25 +1320,29 @@ impl<T: Read> Read for Take<T> {
         self.n -= n as u64;
         Ok(n)
     }
-    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
         if self.n == 0 {
             return Ok(());
         }
         if self.n <= buf.capacity() as u64 {
             let n = self.n.min(usize::MAX as u64) as usize;
-            let r = (n as usize).min(buf.init_mut().len());
-            // Bounds were already checked, compiler might not know.
-            let mut v = BorrowedBuf::from(unsafe { buf.as_mut().get_unchecked_mut(0..n) });
-            unsafe { v.set_init(r) };
-            let mut c = v.unfilled();
-            self.v.read_buf(c.reborrow())?;
-            let x = c.init_mut().len();
-            let f = v.len();
-            unsafe {
-                buf.advance(f);
-                buf.set_init(x);
+            let i = buf.is_init();
+            let mut b = BorrowedBuf::from(unsafe { buf.as_mut().get_unchecked_mut(0..n) });
+            if i {
+                unsafe { b.set_init() };
             }
-            self.n -= f as u64;
+            let mut c = b.unfilled();
+            let r = self.v.read_buf(c.reborrow());
+            let v = b.len();
+            if b.is_init() {
+                unsafe {
+                    buf.as_mut().get_unchecked_mut(n..).write_filled(0);
+                    buf.set_init();
+                }
+            }
+            unsafe { buf.advance(v) };
+            self.n -= v as u64;
+            r?;
         } else {
             let w = buf.written();
             let r = self.v.read_buf(buf.reborrow());
@@ -1404,7 +1408,17 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
         }
         self.s.read(buf)
     }
-    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> IoResult<()> {
+    #[cfg(feature = "alloc")]
+    #[inline]
+    fn read_to_end(&mut self, buf: &mut crate::Vec<u8>) -> IoResult<usize> {
+        let mut n = 0usize;
+        if !self.d {
+            n += self.f.read_to_end(buf)?;
+            self.d = true;
+        }
+        Ok(n + self.s.read_to_end(buf)?)
+    }
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_, u8>) -> IoResult<()> {
         if buf.capacity() == 0 {
             return Ok(());
         }
@@ -1417,16 +1431,6 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
             self.d = true;
         }
         self.s.read_buf(buf)
-    }
-    #[cfg(feature = "alloc")]
-    #[inline]
-    fn read_to_end(&mut self, buf: &mut crate::Vec<u8>) -> IoResult<usize> {
-        let mut n = 0usize;
-        if !self.d {
-            n += self.f.read_to_end(buf)?;
-            self.d = true;
-        }
-        Ok(n + self.s.read_to_end(buf)?)
     }
 }
 
@@ -1494,14 +1498,14 @@ impl<T: AsRef<[u8]>> Read for Cursor<T> {
         r
     }
     #[inline]
-    fn read_buf(&mut self, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf(&mut self, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         let n = cur.written();
         Cursor::split(self).1.read_buf(cur.reborrow())?;
         self.pos += (cur.written() - n) as u64;
         Ok(())
     }
     #[inline]
-    fn read_buf_exact(&mut self, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
+    fn read_buf_exact(&mut self, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
         let n = cur.written();
         let r = Cursor::split(self).1.read_buf_exact(cur.reborrow());
         self.pos += (cur.written() - n) as u64;
@@ -1601,7 +1605,7 @@ pub(crate) fn read_exact<T: ?Sized + Read>(r: &mut T, mut b: &mut [u8]) -> IoRes
     }
     Ok(())
 }
-pub(crate) fn read_buf_exact<T: ?Sized + Read>(r: &mut T, mut cur: BorrowedCursor<'_>) -> IoResult<()> {
+pub(crate) fn read_buf_exact<T: ?Sized + Read>(r: &mut T, mut cur: BorrowedCursor<'_, u8>) -> IoResult<()> {
     while cur.capacity() > 0 {
         let p = cur.written();
         match r.read_buf(cur.reborrow()) {
