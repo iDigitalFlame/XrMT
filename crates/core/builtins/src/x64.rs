@@ -55,7 +55,7 @@ pub fn strlen(x: *const i8) -> usize {
     let v = unsafe {
         let a;
         asm!(
-            "movdqa {1}, [{0}]",
+            "movdqa {1}, [{0:r}]",
             in(reg) y,
             out(xmm_reg) a,
             options(nostack),
@@ -70,7 +70,7 @@ pub fn strlen(x: *const i8) -> usize {
         let i = unsafe {
             let a;
             asm!(
-                "movdqa {1}, [{0}]",
+                "movdqa {1}, [{0:r}]",
                 in(reg) y,
                 out(xmm_reg) a,
                 options(nostack),
@@ -98,7 +98,7 @@ pub fn strlen(x: *const c_void) -> usize {
         let mut v: u64;
         unsafe {
             asm!(
-                "mov {1}, [{0}]",
+                "mov {1}, [{0:r}]",
                 in(reg) s,
                 out(reg) v,
                 options(nostack),
@@ -226,7 +226,7 @@ pub fn copy_backward(x: *mut c_void, y: *const c_void, count: usize) {
             "rep movsb",
             "sub    rsi, 7",
             "sub    rdi, 7",
-            "mov    rcx, {1}",
+            "mov    rcx, {1:r}",
             "rep movsq",
             "test {0:e}, {0:e}",
             "add    rsi, 7",

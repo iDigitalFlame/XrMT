@@ -18,11 +18,22 @@
 #![no_std]
 #![allow(async_fn_in_trait, internal_features)]
 #![feature(allocator_api, likely_unlikely, slice_internals, trait_alias)]
+#![cfg_attr(target_os = "linux", feature(tcp_deferaccept))]
 #![cfg_attr(
     not(target_family = "windows"),
-    feature(buf_read_has_data_left, can_vector, tcp_linger, read_buf, seek_stream_len)
+    feature(
+        borrowed_buf_init,
+        buf_read_has_data_left,
+        can_vector,
+        core_io_borrowed_buf,
+        read_buf,
+        seek_stream_len,
+        tcp_linger
+    )
 )]
-#![cfg_attr(target_os = "linux", feature(tcp_deferaccept))]
+//
+// TODO(dij): coco is still an in progress crate
+#![allow(dead_code, unused)]
 
 #[macro_export]
 macro_rules! coco {

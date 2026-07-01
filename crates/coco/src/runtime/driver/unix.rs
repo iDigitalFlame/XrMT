@@ -41,20 +41,10 @@ use crate::signals::{SignalHandler, SignalMask};
 pub(crate) const FD_READ: i16 = POLLIN | POLLHUP | POLLRDUP;
 pub(crate) const FD_WRITE: i16 = POLLOUT | POLLHUP | POLLRDUP;
 
-#[cfg(any(
-    target_os = "netbsd",
-    target_os = "fuchsia",
-    target_os = "solaris",
-    target_vendor = "apple"
-))]
-const POLLRDUP: i16 = libc::POLLRDHUP;
-#[cfg(all(
-    not(target_os = "netbsd"),
-    not(target_os = "fuchsia"),
-    not(target_os = "solaris"),
-    not(target_vendor = "apple")
-))]
+#[cfg(not(target_os = "fuchsia"))]
 const POLLRDUP: i16 = 0i16;
+#[cfg(target_os = "fuchsia")]
+const POLLRDUP: i16 = libc::EPOLLRDHUP as i16;
 
 pub struct Driver {
     kq:   KQueue,

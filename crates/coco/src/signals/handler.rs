@@ -673,7 +673,7 @@ mod inner {
             return Ok(());
         }
         let mut a = unsafe { zeroed::<sigaction>() };
-        a.sa_sigaction = signal_receiver as _;
+        a.sa_sigaction = signal_receiver as *const () as _;
         a.sa_flags = SA_SIGINFO | SA_NOCLDSTOP;
         errcheck!(sigaction(i, &a, null_mut()))?;
         Ok(())

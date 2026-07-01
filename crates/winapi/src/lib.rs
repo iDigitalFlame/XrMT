@@ -15,9 +15,9 @@
 //
 
 #![no_implicit_prelude]
-#![feature(allocator_api, likely_unlikely)]
-#![cfg_attr(target_family = "windows", no_std)]
+#![feature(allocator_api)]
 #![cfg_attr(feature = "std", feature(raw_os_error_ty, io_error_more))]
+#![cfg_attr(target_family = "windows", no_std, feature(likely_unlikely))]
 
 #[cfg(target_family = "windows")]
 pub use self::winapi::*;

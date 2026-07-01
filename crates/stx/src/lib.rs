@@ -19,19 +19,19 @@
 #![allow(internal_features)]
 #![feature(
     allocator_api,
-    ptr_alignment_type,
-    extend_one,
     format_args_nl,
     layout_for_ptr,
     likely_unlikely,
     log_syntax,
-    never_type,
     panic_internals,
-    slice_concat_trait,
-    slice_range,
+    ptr_alignment_type,
     trace_macros
 )]
 #![cfg_attr(not(target_family = "windows"), feature(exitcode_exit_method))]
+#![cfg_attr(
+    all(target_family = "windows", not(feature = "std")),
+    feature(extend_one, never_type, slice_concat_trait, slice_range)
+)]
 #![cfg_attr(
     feature = "compat",
     feature(
